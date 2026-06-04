@@ -1,0 +1,498 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  super_admin
+  apartment_admin
+  flat_admin
+}
+
+enum ApartmentStatus {
+  active
+  trial
+  suspended
+}
+
+enum PlanCycle {
+  monthly
+  yearly
+  five_year
+}
+
+enum FlatStatus {
+  occupied
+  vacant
+  rented
+}
+
+enum OccupantType {
+  resident
+  tenant
+}
+
+enum CommitteePosition {
+  president
+  secretary
+  treasurer
+  maintenance
+  cultural
+  security
+}
+
+enum Priority {
+  low
+  normal
+  urgent
+}
+
+enum BookingStatus {
+  confirmed
+  completed
+  cancelled
+}
+
+enum ListingStatus {
+  active
+  sold
+  archived
+}
+
+enum VisitorType {
+  guest
+  contractor
+  delivery
+}
+
+enum VisitorStatus {
+  active
+  used
+  expired
+  cancelled
+}
+
+enum ComplaintCategory {
+  plumbing
+  electrical
+  lift
+  parking
+  security
+  cleaning
+  other
+}
+
+enum ComplaintPriority {
+  low
+  medium
+  high
+  emergency
+}
+
+enum ComplaintStatus {
+  active
+  pending
+  in_progress
+  declined
+  closed
+}
+
+enum ComplaintMessageType {
+  message
+  status_change
+}
+
+enum DueStatus {
+  pending
+  pending_verification
+  paid
+  waived
+}
+
+enum DueKind {
+  monthly
+  yearly_amc
+}
+
+enum PaymentStatus {
+  pending_verification
+  approved
+  rejected
+}
+
+model User {
+  id                 String   @id @default(cuid())
+  email              String   @unique
+  passwordHash       String
+  name               String
+  role               Role
+  apartmentId        String?
+  apartmentName      String?
+  flatId             String?
+  flatNumber         String?
+  mustChangePassword Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  apartment  Apartment?  @relation(fields: [apartmentId], references: [id])
+  flat       Flat?       @relation(fields: [flatId], references: [id])
+  ownedFlats FlatOwner[]
+}
+
+model Apartment {
+  id              String          @id
+  code            String          @unique
+  name            String
+  city            String
+  address         String
+  registeredEmail String?
+  totalFlats      Int
+  occupiedFlats   Int
+  planTier        String
+  planCycle       PlanCycle
+  planExpiresAt   DateTime
+  monthlyRevenue  Int
+  status          ApartmentStatus
+  createdAt       DateTime        @default(now())
+
+  // Maintenance / UPI collection config
+  upiId                 String?
+  upiPayeeName          String?
+  upiQrUrl              String?
+  bankName              String?
+  bankAccountNumber     String?
+  bankIfsc              String?
+  monthlyMaintenanceInr Int     @default(2000)
+
+  blocks          Block[]
+  flats           Flat[]
+  users           User[]
+  amenities       Amenity[]
+  rules           SocietyRule[]
+  committee       CommitteeMember[]
+  announcements   Announcement[]
+  bookings        Booking[]
+  listings        Listing[]
+  visitorPasses   VisitorPass[]
+  complaints      Complaint[]
+  maintenanceDues MaintenanceDue[]
+  payments        MaintenancePayment[]
+}
+
+model Block {
+  id          String   @id @default(cuid())
+  apartmentId String
+  name        String
+  createdAt   DateTime @default(now())
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  flats     Flat[]
+
+  @@unique([apartmentId, name])
+}
+
+model Flat {
+  id                    String       @id
+  apartmentId           String
+  blockId               String?
+  block                 String
+  number                String
+  ownerName             String
+  ownerEmail            String?
+  ownerMobile           String?
+  occupantType          OccupantType @default(resident)
+  tenantName            String?
+  residentCount         Int
+  status                FlatStatus
+  pendingDuesInr        Int
+  // Maintenance billing — per-flat overrides. Defaults match the
+  // typical ₹2 000 / month and ₹9 000 / year AMC + water + tax bundle.
+  monthlyMaintenanceInr Int          @default(2000)
+  yearlyAmcInr          Int          @default(9000)
+
+  apartment       Apartment            @relation(fields: [apartmentId], references: [id])
+  blockRef        Block?               @relation(fields: [blockId], references: [id])
+  residents       Resident[]
+  users           User[]
+  owners          FlatOwner[]
+  visitorPasses   VisitorPass[]
+  complaints      Complaint[]
+  maintenanceDues MaintenanceDue[]
+  payments        MaintenancePayment[]
+}
+
+model FlatOwner {
+  id        String   @id @default(cuid())
+  userId    String
+  flatId    String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flat Flat @relation(fields: [flatId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, flatId])
+  @@index([flatId])
+}
+
+model Amenity {
+  id          String  @id @default(cuid())
+  apartmentId String
+  name        String
+  description String?
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+}
+
+model SocietyRule {
+  id          String @id @default(cuid())
+  apartmentId String
+  text        String
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+}
+
+model CommitteeMember {
+  id          String            @id @default(cuid())
+  apartmentId String
+  position    CommitteePosition
+  name        String
+  flatNumber  String?
+  phone       String?
+  email       String?
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+}
+
+model Resident {
+  id       String @id
+  flatId   String
+  name     String
+  relation String
+  phone    String
+
+  flat Flat @relation(fields: [flatId], references: [id], onDelete: Cascade)
+}
+
+model Announcement {
+  id            String   @id @default(cuid())
+  apartmentId   String
+  title         String
+  body          String
+  priority      Priority
+  pinned        Boolean  @default(false)
+  authorName    String
+  commentsCount Int      @default(0)
+  seenCount     Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id])
+}
+
+model Booking {
+  id           String        @id @default(cuid())
+  apartmentId  String
+  flatNumber   String
+  residentName String
+  court        String
+  date         String
+  startTime    String
+  endTime      String
+  status       BookingStatus
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id])
+}
+
+model Listing {
+  id          String        @id @default(cuid())
+  apartmentId String
+  title       String
+  description String
+  price       Int
+  category    String
+  condition   String
+  tags        String[]
+  sellerName  String
+  sellerFlat  String
+  status      ListingStatus
+  createdAt   DateTime      @default(now())
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id])
+}
+
+model VisitorPass {
+  id          String        @id @default(cuid())
+  apartmentId String
+  flatId      String
+  flatNumber  String
+  guestName   String
+  type        VisitorType
+  code        String
+  status      VisitorStatus
+  createdAt   DateTime      @default(now())
+  expiresAt   DateTime
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id])
+  flat      Flat      @relation(fields: [flatId], references: [id])
+}
+
+model Complaint {
+  id                 String            @id @default(cuid())
+  apartmentId        String
+  flatId             String
+  flatNumber         String
+  blockName          String
+  raisedByUserId     String?
+  raisedByName       String
+  title              String
+  description        String
+  category           ComplaintCategory
+  priority           ComplaintPriority @default(medium)
+  status             ComplaintStatus   @default(active)
+  contactNumber      String
+  preferredVisitTime String?
+  assignedTo         String?
+  adminRemarks       String?
+  closedAt           DateTime?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  apartment Apartment          @relation(fields: [apartmentId], references: [id])
+  flat      Flat               @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  messages  ComplaintMessage[]
+
+  @@index([apartmentId, status])
+  @@index([flatId])
+  @@index([apartmentId, category])
+  @@index([apartmentId, priority])
+}
+
+model ComplaintMessage {
+  id           String               @id @default(cuid())
+  complaintId  String
+  senderUserId String?
+  senderName   String
+  senderRole   Role
+  type         ComplaintMessageType @default(message)
+  body         String
+  createdAt    DateTime             @default(now())
+
+  complaint Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@index([complaintId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance payment module
+// ---------------------------------------------------------------------------
+
+model MaintenanceDue {
+  id          String    @id @default(cuid())
+  apartmentId String
+  flatId      String
+  // Calendar period this due covers.
+  //   · monthly    : month = 1–12
+  //   · yearly_amc : month = 0 (sentinel — one row per calendar year)
+  year        Int
+  month       Int
+  kind        DueKind   @default(monthly)
+  amountInr   Int
+  status      DueStatus @default(pending)
+  // When status moves to paid (after admin approval).
+  paidAt      DateTime?
+  paymentId   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  apartment  Apartment           @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  flat       Flat                @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  payment    MaintenancePayment? @relation(fields: [paymentId], references: [id])
+  selections PaymentMonth[]
+
+  @@unique([flatId, year, month])
+  @@index([apartmentId, status])
+  @@index([flatId, status])
+}
+
+model MaintenancePayment {
+  id               String        @id @default(cuid())
+  reference        String        @unique
+  apartmentId      String
+  flatId           String
+  flatNumber       String
+  blockName        String
+  paidByUserId     String?
+  paidByName       String
+  amountInr        Int
+  upiLink          String
+  transactionNote  String
+  status           PaymentStatus @default(pending_verification)
+  submittedAt      DateTime      @default(now())
+  // Verification trail
+  verifiedAt       DateTime?
+  verifiedByUserId String?
+  verifiedByName   String?
+  rejectedAt       DateTime?
+  rejectedByUserId String?
+  rejectedByName   String?
+  adminRemarks     String?
+  // Receipt
+  receiptNumber    String?       @unique
+  receiptIssuedAt  DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  apartment   Apartment           @relation(fields: [apartmentId], references: [id])
+  flat        Flat                @relation(fields: [flatId], references: [id])
+  months      PaymentMonth[]
+  screenshots PaymentScreenshot[]
+  dues        MaintenanceDue[]
+  receipt     PaymentReceipt?
+
+  @@index([apartmentId, status])
+  @@index([flatId, submittedAt])
+}
+
+model PaymentMonth {
+  id        String   @id @default(cuid())
+  paymentId String
+  dueId     String
+  year      Int
+  month     Int
+  amountInr Int
+  createdAt DateTime @default(now())
+
+  payment MaintenancePayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  due     MaintenanceDue     @relation(fields: [dueId], references: [id], onDelete: Cascade)
+
+  @@unique([paymentId, dueId])
+  @@index([paymentId])
+}
+
+model PaymentScreenshot {
+  id         String   @id @default(cuid())
+  paymentId  String
+  url        String
+  mimeType   String
+  sizeBytes  Int
+  uploadedAt DateTime @default(now())
+
+  payment MaintenancePayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+}
+
+model PaymentReceipt {
+  id            String   @id @default(cuid())
+  paymentId     String   @unique
+  receiptNumber String   @unique
+  amountInr     Int
+  issuedAt      DateTime @default(now())
+  // Cached printable text snapshot. Generated when admin approves.
+  body          String
+
+  payment MaintenancePayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+}
