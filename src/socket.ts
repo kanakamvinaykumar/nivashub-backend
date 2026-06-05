@@ -1,4 +1,4 @@
-import type { Server as HttpServer } from "http";
+import type { IncomingMessage, Server as HttpServer } from "http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { verifyToken, type JwtPayload } from "./lib/jwt.js";
 import { prisma } from "./lib/prisma.js";
@@ -101,7 +101,7 @@ export type NotificationEvent =
 export function registerWebSocketServer(server: HttpServer) {
   const wss = new WebSocketServer({ server, path: "/ws" });
 
-  wss.on("connection", async (socket, req) => {
+  wss.on("connection", async (socket: WebSocket, req: IncomingMessage) => {
     const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
     const token = url.searchParams.get("token");
     const payload = token ? verifyToken(token) : null;
@@ -135,7 +135,7 @@ export function registerWebSocketServer(server: HttpServer) {
       clients.delete(client);
       console.log("WebSocket disconnected", payload.userId);
     });
-    socket.on("error", (error) => {
+    socket.on("error", (error: Error) => {
       console.warn("WebSocket error", error);
     });
   });
