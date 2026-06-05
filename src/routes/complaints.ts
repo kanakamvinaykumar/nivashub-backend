@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomUUID } from "crypto";
 import { z } from "zod";
 import type { ComplaintStatus, Prisma, Role } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
@@ -9,6 +10,8 @@ import {
   buildComplaintStatusChangedMail,
   mailer,
 } from "../lib/mailer.js";
+import { notifyComplaintMessage } from "../socket.js";
+import { processAttachment } from "../lib/media.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -33,6 +36,7 @@ const ComplaintCreateSchema = z.object({
   priority: z.enum(PRIORITIES).default("medium"),
   contactNumber: z.string().min(4).max(40),
   preferredVisitTime: z.string().max(200).optional().nullable(),
+  attachments: z.array(z.string()).max(5).optional(),
 });
 
 const ComplaintFilterSchema = z.object({
@@ -107,6 +111,12 @@ router.post("/", async (req, res) => {
   }
   const raisedBy = await prisma.user.findUnique({ where: { id: req.auth!.userId } });
 
+  const attachments = await Promise.all(
+    (parsed.data.attachments ?? []).map((attachment, index) =>
+      processAttachment(attachment, `complaint_${flat.id}_${randomUUID()}_${index}`),
+    ),
+  );
+
   const complaint = await prisma.complaint.create({
     data: {
       apartmentId: flat.apartmentId,
@@ -121,6 +131,7 @@ router.post("/", async (req, res) => {
       priority: parsed.data.priority,
       contactNumber: parsed.data.contactNumber.trim(),
       preferredVisitTime: parsed.data.preferredVisitTime?.trim() || null,
+      attachments,
     },
   });
 
@@ -442,6 +453,17 @@ router.post("/:id/messages", async (req, res) => {
 
   // bump updatedAt
   await prisma.complaint.update({ where: { id: complaint.id }, data: { updatedAt: new Date() } });
+
+  notifyComplaintMessage({
+    complaintId: complaint.id,
+    apartmentId: complaint.apartmentId,
+    flatId: complaint.flatId,
+    title: complaint.title,
+    senderName,
+    senderRole: role as "flat_admin" | "apartment_admin" | "super_admin",
+    preview: parsed.data.body.length > 240 ? parsed.data.body.slice(0, 240) + "…" : parsed.data.body,
+    createdAt: message.createdAt.toISOString(),
+  });
 
   // Notify the other side via email.
   try {

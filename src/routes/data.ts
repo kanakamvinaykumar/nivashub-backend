@@ -7,6 +7,8 @@ import { plans } from "../lib/plans.js";
 import { getAssociation } from "../lib/association.js";
 import { buildApartmentWelcomeMail, generateTempPassword, mailer, sendOwnerInvite } from "../lib/mailer.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { notifyVisitorPassCreated, notifyVisitorPassUpdated, notifyAnnouncementCreated } from "../socket.js";
+import { processAttachment } from "../lib/media.js";
 
 const router = Router();
 
@@ -100,6 +102,105 @@ router.get("/apartments/:id/members", async (req, res) => {
   res.json(members);
 });
 
+const SecurityMemberSchema = z.object({
+  name: z.string().min(1).max(120),
+  email: z.string().email(),
+  password: z.string().min(6).max(100),
+  phone: z.string().min(6).max(30).optional(),
+  shift: z.enum(["day", "night"]).optional(),
+  notes: z.string().max(500).optional(),
+});
+
+router.get("/apartments/:id/security-members", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+  const users = await prisma.user.findMany({
+    where: { apartmentId: req.params.id, role: "security" },
+    orderBy: { name: "asc" },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      apartmentId: true,
+      apartmentName: true,
+      phone: true,
+      shift: true,
+      notes: true,
+    },
+  });
+  res.json(users);
+});
+
+router.post("/apartments/:id/security-members", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+  const parsed = SecurityMemberSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+
+  const apartment = await prisma.apartment.findUnique({ where: { id: req.params.id } });
+  if (!apartment) {
+    res.status(404).json({ message: "Apartment not found" });
+    return;
+  }
+
+  const existing = await prisma.user.findUnique({ where: { email: parsed.data.email.toLowerCase() } });
+  if (existing) {
+    res.status(409).json({ message: "Email is already registered" });
+    return;
+  }
+
+  const user = await prisma.user.create({
+    data: {
+      email: parsed.data.email.toLowerCase(),
+      name: parsed.data.name,
+      role: "security",
+      apartmentId: apartment.id,
+      apartmentName: apartment.name,
+      passwordHash: await bcrypt.hash(parsed.data.password, 10),
+      phone: parsed.data.phone,
+      shift: parsed.data.shift,
+      notes: parsed.data.notes,
+    },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      apartmentId: true,
+      apartmentName: true,
+      phone: true,
+      shift: true,
+      notes: true,
+    },
+  });
+
+  res.status(201).json(user);
+});
+
+router.delete("/apartments/:id/security-members/:userId", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
+  if (!user || user.role !== "security" || user.apartmentId !== req.params.id) {
+    res.status(404).json({ message: "Security member not found" });
+    return;
+  }
+
+  await prisma.user.delete({ where: { id: user.id } });
+  res.json({ ok: true });
+});
+
 router.get("/flats/:id", async (req, res) => {
   const flat = await prisma.flat.findUnique({
     where: { id: req.params.id },
@@ -161,6 +262,7 @@ const AnnouncementSchema = z.object({
   priority: z.enum(["low", "normal", "urgent"]),
   pinned: z.boolean(),
   authorName: z.string().min(1),
+  attachments: z.array(z.string()).max(5).optional(),
 });
 
 router.post("/announcements", async (req, res) => {
@@ -169,8 +271,26 @@ router.post("/announcements", async (req, res) => {
     res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
     return;
   }
+  const attachments = await Promise.all(
+    (parsed.data.attachments ?? []).map((attachment, index) =>
+      processAttachment(attachment, `announcement_${randomUUID()}_${index}`),
+    ),
+  );
   const created = await prisma.announcement.create({
-    data: { ...parsed.data, commentsCount: 0, seenCount: 0 },
+    data: { ...parsed.data, attachments, commentsCount: 0, seenCount: 0 },
+  });
+  notifyAnnouncementCreated({
+    id: created.id,
+    apartmentId: created.apartmentId,
+    title: created.title,
+    body: created.body,
+    priority: created.priority,
+    pinned: created.pinned,
+    authorName: created.authorName,
+    attachments: created.attachments,
+    commentsCount: created.commentsCount,
+    seenCount: created.seenCount,
+    createdAt: created.createdAt.toISOString(),
   });
   res.status(201).json(created);
 });
@@ -1316,8 +1436,55 @@ router.get("/visitor-passes", async (req, res) => {
       ...(flatId ? { flatId } : {}),
     },
     orderBy: { createdAt: "desc" },
+    include: {
+      flat: {
+        select: {
+          ownerName: true,
+          ownerMobile: true,
+        },
+      },
+    },
   });
   res.json(list);
+});
+
+const VisitorPassUpdateSchema = z.object({
+  status: z.enum(["active", "used", "cancelled"]),
+});
+
+router.patch("/visitor-passes/:id", requireRole("security", "apartment_admin", "super_admin"), async (req, res) => {
+  const parsed = VisitorPassUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+
+  const visitorPass = await prisma.visitorPass.findUnique({ where: { id: req.params.id } });
+  if (!visitorPass) {
+    res.status(404).json({ message: "Visitor pass not found" });
+    return;
+  }
+  if (req.auth!.role !== "super_admin" && req.auth!.apartmentId !== visitorPass.apartmentId) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+
+  const updated = await prisma.visitorPass.update({
+    where: { id: req.params.id },
+    data: { status: parsed.data.status },
+  });
+  notifyVisitorPassUpdated({
+    id: updated.id,
+    apartmentId: updated.apartmentId,
+    flatId: updated.flatId,
+    flatNumber: updated.flatNumber,
+    guestName: updated.guestName,
+    type: updated.type,
+    status: updated.status,
+    createdAt: updated.createdAt.toISOString(),
+    expiresAt: updated.expiresAt.toISOString(),
+  });
+  res.json(updated);
 });
 
 const VisitorPassSchema = z.object({
@@ -1343,6 +1510,17 @@ router.post("/visitor-passes", async (req, res) => {
       status: "active",
       expiresAt: new Date(Date.now() + validForHours * 3600 * 1000),
     },
+  });
+  notifyVisitorPassCreated({
+    id: created.id,
+    apartmentId: created.apartmentId,
+    flatId: created.flatId,
+    flatNumber: created.flatNumber,
+    guestName: created.guestName,
+    type: created.type,
+    status: created.status,
+    createdAt: created.createdAt.toISOString(),
+    expiresAt: created.expiresAt.toISOString(),
   });
   res.status(201).json(created);
 });

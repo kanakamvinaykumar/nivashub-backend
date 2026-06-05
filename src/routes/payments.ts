@@ -1,6 +1,7 @@
 import express, { Router } from "express";
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
+import { v2 as cloudinary } from "cloudinary";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import {
@@ -20,6 +21,12 @@ import {
   buildPaymentSubmittedOwnerMail,
   mailer,
 } from "../lib/mailer.js";
+import {
+  notifyPaymentSubmitted,
+  notifyPaymentApproved,
+  notifyPaymentRejected,
+  type PaymentNotificationData,
+} from "../socket.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -44,6 +51,22 @@ function monthsLabel(months: Array<{ year: number; month: number }>): string {
     .sort((a, b) => a.year - b.year || a.month - b.month)
     .map((m) => monthLabel(m.year, m.month))
     .join(", ");
+}
+
+const cloudinaryUploadEnabled = Boolean(process.env.CLOUDINARY_URL);
+if (cloudinaryUploadEnabled) {
+  cloudinary.config({ cloudinary_url: process.env.CLOUDINARY_URL });
+}
+
+async function uploadScreenshotToCloudinary(dataUrl: string, publicId: string): Promise<string> {
+  const folder = process.env.CLOUDINARY_FOLDER?.trim() || "nivashub/payment_screenshots";
+  const upload = await cloudinary.uploader.upload(dataUrl, {
+    folder,
+    public_id: publicId,
+    overwrite: false,
+    resource_type: "image",
+  });
+  return upload.secure_url;
 }
 
 // ---------------------------------------------------------------------------
@@ -360,10 +383,9 @@ router.post("/", async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /payments/:id/screenshot
 // Body: { dataUrl: "data:image/png;base64,..." }
-// Accepts a single base64-encoded image up to ~6 MB. The image is stored
-// inline (data URL) so this module is self-contained — production
-// deployments can swap this for an S3 / GCS uploader by replacing the
-// `url` value below without changing the schema or frontend.
+// Accepts a single base64-encoded image up to ~6 MB. If Cloudinary is
+// configured, the image is uploaded there; otherwise it is stored inline
+// as a data URL so the endpoint remains self-contained.
 // ---------------------------------------------------------------------------
 const ScreenshotSchema = z.object({
   dataUrl: z
@@ -414,10 +436,24 @@ router.post(
     const base64Body = mimeMatch[2];
     const sizeBytes = Math.floor((base64Body.length * 3) / 4);
 
+    let screenshotUrl = parsed.data.dataUrl;
+    if (cloudinaryUploadEnabled) {
+      try {
+        screenshotUrl = await uploadScreenshotToCloudinary(
+          parsed.data.dataUrl,
+          `payment_${payment.reference}_${Date.now()}`,
+        );
+      } catch (error) {
+        console.error("[cloudinary] screenshot upload failed", error);
+        res.status(502).json({ message: "Unable to upload screenshot to Cloudinary" });
+        return;
+      }
+    }
+
     const screenshot = await prisma.paymentScreenshot.create({
       data: {
         paymentId: payment.id,
-        url: parsed.data.dataUrl,
+        url: screenshotUrl,
         mimeType,
         sizeBytes,
       },
@@ -440,6 +476,19 @@ router.post(
     try {
       const months = monthsLabel(payment.months);
       const owner = payment.flat.ownerEmail;
+      const notificationData: PaymentNotificationData = {
+        id: payment.id,
+        reference: payment.reference,
+        apartmentId: payment.apartmentId,
+        flatId: payment.flatId,
+        flatNumber: payment.flatNumber,
+        blockName: payment.blockName,
+        paidByName: payment.paidByName,
+        amountInr: payment.amountInr,
+        status: payment.status,
+        submittedAt: payment.submittedAt.toISOString(),
+      };
+      notifyPaymentSubmitted(notificationData);
       if (owner) {
         await mailer.send(
           buildPaymentSubmittedOwnerMail({
@@ -695,6 +744,19 @@ router.post(
     });
 
     try {
+      const notificationData: PaymentNotificationData = {
+        id: updated.id,
+        reference: updated.reference,
+        apartmentId: updated.apartmentId,
+        flatId: updated.flatId,
+        flatNumber: updated.flatNumber,
+        blockName: updated.blockName,
+        paidByName: updated.paidByName,
+        amountInr: updated.amountInr,
+        status: updated.status,
+        submittedAt: updated.submittedAt.toISOString(),
+      };
+      notifyPaymentApproved(notificationData);
       if (payment.flat.ownerEmail) {
         await mailer.send(
           buildPaymentApprovedOwnerMail({
@@ -777,6 +839,19 @@ router.post(
     });
 
     try {
+      const notificationData: PaymentNotificationData = {
+        id: updated.id,
+        reference: updated.reference,
+        apartmentId: updated.apartmentId,
+        flatId: updated.flatId,
+        flatNumber: updated.flatNumber,
+        blockName: updated.blockName,
+        paidByName: updated.paidByName,
+        amountInr: updated.amountInr,
+        status: updated.status,
+        submittedAt: updated.submittedAt.toISOString(),
+      };
+      notifyPaymentRejected(notificationData);
       if (payment.flat.ownerEmail) {
         await mailer.send(
           buildPaymentRejectedOwnerMail({
@@ -843,3 +918,4 @@ router.get("/:id/receipt", async (req, res) => {
 });
 
 export default router;
+

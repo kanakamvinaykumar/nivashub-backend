@@ -13,6 +13,20 @@ const LoginSchema = z.object({
   password: z.string().min(1),
 });
 
+const UpdateAccountSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    currentPassword: z.string().min(1).optional(),
+    newPassword: z.string().min(6).optional(),
+  })
+  .refine(
+    (data) => !(data.newPassword && !data.currentPassword),
+    {
+      message: "Current password is required to change your password",
+      path: ["currentPassword"],
+    },
+  );
+
 router.post("/login", async (req, res) => {
   const parsed = LoginSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -98,6 +112,49 @@ router.get("/me", requireAuth, async (req, res) => {
     apartmentName: user.apartmentName,
     flatId: user.flatId,
     flatNumber: user.flatNumber,
+  });
+});
+
+router.patch("/me", requireAuth, async (req, res) => {
+  const parsed = UpdateAccountSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: req.auth!.userId } });
+  if (!user) {
+    res.status(401).json({ message: "Not authenticated" });
+    return;
+  }
+
+  const updateData: { name?: string; passwordHash?: string } = {};
+  if (parsed.data.name && parsed.data.name !== user.name) {
+    updateData.name = parsed.data.name;
+  }
+
+  if (parsed.data.newPassword) {
+    const passwordMatch = await bcrypt.compare(parsed.data.currentPassword!, user.passwordHash);
+    if (!passwordMatch) {
+      res.status(401).json({ message: "Current password is incorrect" });
+      return;
+    }
+    updateData.passwordHash = await bcrypt.hash(parsed.data.newPassword, 10);
+  }
+
+  const updatedUser = updateData.name || updateData.passwordHash
+    ? await prisma.user.update({ where: { id: user.id }, data: updateData })
+    : user;
+
+  res.json({
+    id: updatedUser.id,
+    email: updatedUser.email,
+    name: updatedUser.name,
+    role: updatedUser.role,
+    apartmentId: updatedUser.apartmentId,
+    apartmentName: updatedUser.apartmentName,
+    flatId: updatedUser.flatId,
+    flatNumber: updatedUser.flatNumber,
   });
 });
 

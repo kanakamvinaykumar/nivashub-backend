@@ -11,6 +11,7 @@ enum Role {
   super_admin
   apartment_admin
   flat_admin
+  security
 }
 
 enum ApartmentStatus {
@@ -118,6 +119,11 @@ enum DueKind {
   yearly_amc
 }
 
+enum Shift {
+  day
+  night
+}
+
 enum PaymentStatus {
   pending_verification
   approved
@@ -134,6 +140,9 @@ model User {
   apartmentName      String?
   flatId             String?
   flatNumber         String?
+  phone              String?
+  shift              Shift?
+  notes              String?
   mustChangePassword Boolean  @default(false)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
@@ -285,6 +294,7 @@ model Announcement {
   priority      Priority
   pinned        Boolean  @default(false)
   authorName    String
+  attachments   String[] @default([])
   commentsCount Int      @default(0)
   seenCount     Int      @default(0)
   createdAt     DateTime @default(now())
@@ -354,6 +364,7 @@ model Complaint {
   status             ComplaintStatus   @default(active)
   contactNumber      String
   preferredVisitTime String?
+  attachments        String[]          @default([])
   assignedTo         String?
   adminRemarks       String?
   closedAt           DateTime?

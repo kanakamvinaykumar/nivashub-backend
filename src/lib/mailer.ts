@@ -313,7 +313,6 @@ export function buildFlatOwnerWelcomeWhatsApp(args: OwnerInviteArgs): WhatsAppMe
 
 export async function sendOwnerInvite(args: OwnerInviteArgs): Promise<{ email: boolean; whatsapp: boolean }> {
   const result = { email: false, whatsapp: false };
-
   const mail = buildFlatOwnerWelcomeMail(args);
   if (mail) {
     try {
@@ -324,13 +323,27 @@ export async function sendOwnerInvite(args: OwnerInviteArgs): Promise<{ email: b
     }
   }
 
-  const wa = buildFlatOwnerWelcomeWhatsApp(args);
-  if (wa) {
-    try {
-      await whatsapp.send(wa);
-      result.whatsapp = true;
-    } catch (err) {
-      console.error("[whatsapp] failed to send owner invite", err);
+  // Optionally disable WhatsApp sends if the server is configured to use
+  // email-only invites. Set DISABLE_WHATSAPP=true in the environment to
+  // prevent WhatsApp messages from being sent (useful when you prefer
+  // delivering login details by email only, e.g. via Gmail SMTP).
+  const disableWhatsApp = String(process.env.DISABLE_WHATSAPP ?? "false").toLowerCase() === "true";
+  if (!disableWhatsApp) {
+    const wa = buildFlatOwnerWelcomeWhatsApp(args);
+    if (wa) {
+      try {
+        await whatsapp.send(wa);
+        result.whatsapp = true;
+      } catch (err) {
+        console.error("[whatsapp] failed to send owner invite", err);
+      }
+    }
+  } else {
+    if (!result.email) {
+      // nothing to send, but log for visibility
+      console.log("[invite] DISABLE_WHATSAPP=true and no email available — no invite sent");
+    } else {
+      console.log("[invite] DISABLE_WHATSAPP=true — WhatsApp suppressed, email sent");
     }
   }
 

@@ -1,5 +1,5 @@
 -- CreateEnum
-CREATE TYPE "Role" AS ENUM ('super_admin', 'apartment_admin', 'flat_admin');
+CREATE TYPE "Role" AS ENUM ('super_admin', 'apartment_admin', 'flat_admin', 'security');
 
 -- CreateEnum
 CREATE TYPE "ApartmentStatus" AS ENUM ('active', 'trial', 'suspended');
