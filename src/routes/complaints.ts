@@ -78,6 +78,9 @@ async function findAdminEmails(apartmentId: string): Promise<string[]> {
   return admins.map((a) => a.email);
 }
 
+// Toggle complaint-related outbound emails. Default: disabled unless explicitly set to 'true'.
+const COMPLAINT_EMAILS_ENABLED = process.env.COMPLAINT_EMAILS_ENABLED === "true";
+
 // ---------------------------------------------------------------------------
 // POST /complaints
 // flat_admin: creates a complaint for their own flat
@@ -136,27 +139,29 @@ router.post("/", async (req, res) => {
   });
 
   // Notify apartment admins.
-  try {
-    const admins = await findAdminEmails(flat.apartmentId);
-    await Promise.all(
-      admins.map((adminEmail) =>
-        mailer.send(
-          buildComplaintCreatedAdminMail({
-            adminEmail,
-            apartmentName: apartment.name,
-            flatNumber: flat.number,
-            raisedByName: complaint.raisedByName,
-            complaintId: complaint.id,
-            title: complaint.title,
-            category: complaint.category,
-            priority: complaint.priority,
-            loginUrl: loginUrl(),
-          }),
+  if (COMPLAINT_EMAILS_ENABLED) {
+    try {
+      const admins = await findAdminEmails(flat.apartmentId);
+      await Promise.all(
+        admins.map((adminEmail) =>
+          mailer.send(
+            buildComplaintCreatedAdminMail({
+              adminEmail,
+              apartmentName: apartment.name,
+              flatNumber: flat.number,
+              raisedByName: complaint.raisedByName,
+              complaintId: complaint.id,
+              title: complaint.title,
+              category: complaint.category,
+              priority: complaint.priority,
+              loginUrl: loginUrl(),
+            }),
+          ),
         ),
-      ),
-    );
-  } catch (err) {
-    console.error("[mail] complaint-created admin notification failed", err);
+      );
+    } catch (err) {
+      console.error("[mail] complaint-created admin notification failed", err);
+    }
   }
 
   res.status(201).json(complaint);
@@ -356,7 +361,7 @@ router.patch(
       return c;
     });
 
-    if (apartment && flat?.ownerEmail) {
+    if (COMPLAINT_EMAILS_ENABLED && apartment && flat?.ownerEmail) {
       try {
         await mailer.send(
           buildComplaintStatusChangedMail({
@@ -465,56 +470,58 @@ router.post("/:id/messages", async (req, res) => {
     createdAt: message.createdAt.toISOString(),
   });
 
-  // Notify the other side via email.
-  try {
-    const apartment = await prisma.apartment.findUnique({ where: { id: complaint.apartmentId } });
-    const preview = parsed.data.body.length > 240 ? parsed.data.body.slice(0, 240) + "…" : parsed.data.body;
-    if (role === "flat_admin") {
-      // admin gets notified
-      const admins = await findAdminEmails(complaint.apartmentId);
-      await Promise.all(
-        admins.map((adminEmail) =>
-          mailer.send(
-            buildComplaintReplyMail({
-              to: adminEmail,
-              ownerName: "team",
-              replierName: senderName,
-              apartmentName: apartment?.name ?? "your society",
-              flatNumber: complaint.flatNumber,
-              complaintId: complaint.id,
-              title: complaint.title,
-              category: complaint.category,
-              priority: complaint.priority,
-              preview,
-              loginUrl: loginUrl(),
-            }),
-          ),
-        ),
-      );
-    } else {
-      // resident gets notified
-      const flat = await prisma.flat.findUnique({ where: { id: complaint.flatId } });
-      if (flat?.ownerEmail) {
-        await mailer.send(
-          buildComplaintReplyMail({
-            to: flat.ownerEmail,
-            ownerName: complaint.raisedByName,
-            replierName: senderName,
-            apartmentName: apartment?.name ?? "your society",
-            flatNumber: complaint.flatNumber,
-            complaintId: complaint.id,
-            title: complaint.title,
-            category: complaint.category,
-            priority: complaint.priority,
-            preview,
-            loginUrl: loginUrl(),
-          }),
-        );
-      }
-    }
-  } catch (err) {
-    console.error("[mail] complaint reply notification failed", err);
-  }
+   // Notify the other side via email (disabled unless COMPLAINT_EMAILS_ENABLED=true).
+   if (COMPLAINT_EMAILS_ENABLED) {
+     try {
+       const apartment = await prisma.apartment.findUnique({ where: { id: complaint.apartmentId } });
+       const preview = parsed.data.body.length > 240 ? parsed.data.body.slice(0, 240) + "…" : parsed.data.body;
+       if (role === "flat_admin") {
+         // admin gets notified
+         const admins = await findAdminEmails(complaint.apartmentId);
+         await Promise.all(
+           admins.map((adminEmail) =>
+             mailer.send(
+               buildComplaintReplyMail({
+                 to: adminEmail,
+                 ownerName: "team",
+                 replierName: senderName,
+                 apartmentName: apartment?.name ?? "your society",
+                 flatNumber: complaint.flatNumber,
+                 complaintId: complaint.id,
+                 title: complaint.title,
+                 category: complaint.category,
+                 priority: complaint.priority,
+                 preview,
+                 loginUrl: loginUrl(),
+               }),
+             ),
+           ),
+         );
+       } else {
+         // resident gets notified
+         const flat = await prisma.flat.findUnique({ where: { id: complaint.flatId } });
+         if (flat?.ownerEmail) {
+           await mailer.send(
+             buildComplaintReplyMail({
+               to: flat.ownerEmail,
+               ownerName: complaint.raisedByName,
+               replierName: senderName,
+               apartmentName: apartment?.name ?? "your society",
+               flatNumber: complaint.flatNumber,
+               complaintId: complaint.id,
+               title: complaint.title,
+               category: complaint.category,
+               priority: complaint.priority,
+               preview,
+               loginUrl: loginUrl(),
+             }),
+           );
+         }
+       }
+     } catch (err) {
+       console.error("[mail] complaint reply notification failed", err);
+     }
+   }
 
   res.status(201).json(message);
 });

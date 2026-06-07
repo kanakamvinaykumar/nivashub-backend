@@ -70,6 +70,9 @@ function createSmtpMailer(): Mailer | null {
     port,
     secure,
     auth: { user, pass },
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT ?? 10000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT ?? 10000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT ?? 20000),
   });
 
   return {
@@ -206,23 +209,124 @@ export function buildApartmentWelcomeMail(args: {
   loginUrl: string;
 }): MailMessage {
   const { apartmentName, apartmentCode, adminName, email, tempPassword, loginUrl } = args;
+  
+  // Ensure we use https://nivashub.in/login if not in dev
+  const finalLoginUrl = loginUrl.includes("localhost") ? loginUrl : "https://nivashub.in/login";
+  
   return {
     to: email,
-    subject: `Welcome to NivasHub — login details for ${apartmentName}`,
+    subject: `🎉 Welcome to NivasHub — ${apartmentName} is now registered!`,
     text: [
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
       `Hello ${adminName},`,
-      "",
-      `Your society ${apartmentName} has been registered on NivasHub.`,
-      `You can now log in and finish setting up your blocks, flats and residents.`,
-      "",
-      `Login URL:        ${loginUrl}`,
-      `Apartment code:   ${apartmentCode}`,
-      `Email:            ${email}`,
-      `Temporary password: ${tempPassword}`,
-      "",
-      `Please change your password after your first login.`,
-      "",
-      `— NivasHub`,
+      ``,
+      `Welcome to NivasHub! 🏢`,
+      ``,
+      `Your society "${apartmentName}" has been successfully registered on our platform.`,
+      `Everything is now ready for you to start managing your community.`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `WHAT YOU CAN NOW DO`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `✓ Set up your building blocks and flat inventory`,
+      `✓ Add residents and manage flat ownership`,
+      `✓ Post announcements and community notices`,
+      `✓ Manage amenity bookings (gym, pool, courts, etc.)`,
+      `✓ Track visitor passes and security`,
+      `✓ Monitor maintenance payments and dues`,
+      `✓ Connect your community members`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `YOUR LOGIN CREDENTIALS`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `📱 Login URL:          ${finalLoginUrl}`,
+      `🏢 Apartment Code:     ${apartmentCode}`,
+      `📧 Email:              ${email}`,
+      `🔐 Temporary Password: ${tempPassword}`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `GETTING STARTED`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `1️⃣  Visit ${finalLoginUrl}`,
+      `2️⃣  Use the credentials above to log in`,
+      `3️⃣  Change your password immediately (security first!)`,
+      `4️⃣  Add your building blocks and flats`,
+      `5️⃣  Invite flat owners to complete their profiles`,
+      `6️⃣  Start managing your community!`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `⚠️  Important: Change your temporary password after your first login.`,
+      ``,
+      `Have questions or need support? Reach out to us anytime at support@nivashub.in`,
+      `or visit https://nivashub.in/help`,
+      ``,
+      `Welcome to the NivasHub community!`,
+      ``,
+      `Warm regards,`,
+      `The NivasHub Team`,
+      `https://nivashub.in`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+    ].join("\n"),
+  };
+}
+
+export function buildApartmentAdminWelcomeMail(args: {
+  apartmentName: string;
+  apartmentCode: string;
+  adminName: string;
+  email: string;
+  tempPassword: string;
+  loginUrl: string;
+  position?: string;
+}): MailMessage {
+  const { apartmentName, apartmentCode, adminName, email, tempPassword, loginUrl, position } = args;
+  const finalLoginUrl = loginUrl.includes("localhost") ? loginUrl : "https://nivashub.in/login";
+  const positionLabel = position ? ` (${position})` : "";
+
+  return {
+    to: email,
+    subject: `🛠️ NivasHub access granted — ${apartmentName}`,
+    text: [
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `Hello ${adminName},`,
+      ``,
+      `You have been added as an apartment admin${positionLabel} for ${apartmentName}.`,
+      `Your access is now ready on NivasHub, and you can manage apartment operations for your community.`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `YOUR LOGIN CREDENTIALS`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `📱 Login URL:          ${finalLoginUrl}`,
+      `🏢 Apartment Code:     ${apartmentCode}`,
+      `📧 Email:              ${email}`,
+      `🔐 Temporary Password: ${tempPassword}`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `GETTING STARTED`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `1️⃣  Visit ${finalLoginUrl}`,
+      `2️⃣  Log in using the credentials above`,
+      `3️⃣  Change your password immediately`,
+      `4️⃣  Start managing announcements, bookings, payments, and security`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `Questions? Contact your support team at support@nivashub.in`,
+      ``,
+      `Best regards,`,
+      `The NivasHub Team`,
+      `https://nivashub.in`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     ].join("\n"),
   };
 }
@@ -241,23 +345,74 @@ interface OwnerInviteArgs {
 export function buildFlatOwnerWelcomeMail(args: OwnerInviteArgs): MailMessage | null {
   if (!args.email) return null;
   const { apartmentName, apartmentCode, ownerName, flatNumber, email, tempPassword, loginUrl } = args;
+  
+  // Ensure we use https://nivashub.in/login if not in dev
+  const finalLoginUrl = loginUrl.includes("localhost") ? loginUrl : "https://nivashub.in/login";
+  
   const passwordSection = tempPassword
-    ? [`Email:              ${email}`, `Temporary password: ${tempPassword}`, "", `Please change your password after your first login.`]
-    : [`Email:              ${email}`, "", `Use the existing password on your NivasHub account. Reset it from the login page if you've forgotten it.`];
+    ? [
+        `🔐 Temporary Password: ${tempPassword}`,
+        ``,
+        `⚠️  Please change your password after your first login.`
+      ]
+    : [
+        `Use your existing NivasHub account password.`,
+        `If you've forgotten it, reset it from the login page.`
+      ];
+  
   return {
     to: email,
-    subject: `You're invited to NivasHub — flat ${flatNumber} at ${apartmentName}`,
+    subject: `🏠 Welcome to NivasHub — ${flatNumber}, ${apartmentName}`,
     text: [
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
       `Hello ${ownerName},`,
-      "",
-      `You have been added as the owner of flat ${flatNumber} at ${apartmentName} on NivasHub.`,
-      `Through NivasHub you can see announcements, book amenities, manage visitor passes, and update your flat's details.`,
-      "",
-      `Login URL:          ${loginUrl}`,
-      `Apartment code:     ${apartmentCode}`,
+      ``,
+      `Welcome to NivasHub! 🎉`,
+      ``,
+      `You've been registered as the owner of flat ${flatNumber} at ${apartmentName}.`,
+      `Your community is now just a tap away!`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `WHAT YOU CAN NOW DO`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `📢 Receive announcements & notices from management`,
+      `📅 Book amenities (gym, pool, courts, parking, etc.)`,
+      `👥 Manage visitor passes for guests & contractors`,
+      `📝 Update your flat details & resident information`,
+      `💳 Track maintenance payments & dues`,
+      `👫 Connect with neighbors & community members`,
+      `🔔 Stay updated on society activities`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `YOUR LOGIN CREDENTIALS`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `📱 Login URL:          ${finalLoginUrl}`,
+      `🏢 Apartment Code:     ${apartmentCode}`,
+      `📧 Email:              ${email}`,
       ...passwordSection,
-      "",
-      `— NivasHub`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `GET STARTED IN 3 STEPS`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `1️⃣  Visit ${finalLoginUrl}`,
+      `2️⃣  Log in with your email and password`,
+      `3️⃣  Complete your profile & explore your dashboard`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      ``,
+      `Questions? Contact your apartment management or email us at support@nivashub.in`,
+      ``,
+      `Welcome to your community!`,
+      ``,
+      `Best regards,`,
+      `The NivasHub Team`,
+      `https://nivashub.in`,
+      ``,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     ].join("\n"),
   };
 }
@@ -345,6 +500,213 @@ export async function sendOwnerInvite(args: OwnerInviteArgs): Promise<{ email: b
     } else {
       console.log("[invite] DISABLE_WHATSAPP=true — WhatsApp suppressed, email sent");
     }
+  }
+
+  return result;
+}
+
+interface TenantInviteArgs {
+  apartmentName: string;
+  apartmentCode: string;
+  flatNumber: string;
+  tenantName: string;
+  ownerName: string;
+  ownerEmail: string | null;
+  ownerMobile: string | null;
+  email: string | null;
+  mobile: string | null;
+  tempPassword: string | null;
+  loginUrl: string;
+}
+
+export function buildFlatTenantWelcomeMail(args: TenantInviteArgs): MailMessage | null {
+  if (!args.email) return null;
+  const lines = [
+    `Hello ${args.tenantName},`,
+    "",
+    `You have been added as a tenant for flat ${args.flatNumber} at ${args.apartmentName}.`,
+    `Apartment code: ${args.apartmentCode}`,
+    "",
+    `Owner contact: ${args.ownerName}`,
+    args.ownerEmail ? `Owner email: ${args.ownerEmail}` : undefined,
+    args.ownerMobile ? `Owner phone: ${args.ownerMobile}` : undefined,
+    "",
+    `Login URL: ${args.loginUrl}`,
+  ].filter(Boolean) as string[];
+
+  if (args.tempPassword) {
+    lines.push("", `Temporary password: ${args.tempPassword}`, "Please change your password after your first login.");
+  } else {
+    lines.push("", "Use your existing NivasHub password or reset it from the login page if needed.");
+  }
+
+  return {
+    to: args.email,
+    subject: `Tenant access to ${args.apartmentName} — flat ${args.flatNumber}`,
+    text: lines.join("\n"),
+  };
+}
+
+export function buildFlatTenantWelcomeWhatsApp(args: TenantInviteArgs): WhatsAppMessage | null {
+  if (!args.mobile) return null;
+  const lines = [
+    `Hello ${args.tenantName},`,
+    "",
+    `You have been added as a tenant for flat ${args.flatNumber} at ${args.apartmentName}.`,
+    `Apartment code: ${args.apartmentCode}`,
+    "",
+    `Owner contact: ${args.ownerName}`,
+    args.ownerEmail ? `Owner email: ${args.ownerEmail}` : undefined,
+    args.ownerMobile ? `Owner phone: ${args.ownerMobile}` : undefined,
+    "",
+    `Login URL: ${args.loginUrl}`,
+  ].filter(Boolean) as string[];
+
+  return {
+    to: args.mobile,
+    text: lines.join("\n"),
+  };
+}
+
+export async function sendTenantInvite(args: TenantInviteArgs): Promise<{ email: boolean; whatsapp: boolean }> {
+  const result = { email: false, whatsapp: false };
+  const mail = buildFlatTenantWelcomeMail(args);
+  if (mail) {
+    try {
+      await mailer.send(mail);
+      result.email = true;
+    } catch (err) {
+      console.error("[mail] failed to send tenant invite", err);
+    }
+  }
+
+  const disableWhatsApp = String(process.env.DISABLE_WHATSAPP ?? "false").toLowerCase() === "true";
+  if (!disableWhatsApp) {
+    const wa = buildFlatTenantWelcomeWhatsApp(args);
+    if (wa) {
+      try {
+        await whatsapp.send(wa);
+        result.whatsapp = true;
+      } catch (err) {
+        console.error("[whatsapp] failed to send tenant invite", err);
+      }
+    }
+  } else if (!result.email) {
+    console.log("[invite] DISABLE_WHATSAPP=true and no email available — no invite sent");
+  }
+
+  return result;
+}
+
+interface FlatAccountStatusNotificationArgs {
+  apartmentName: string;
+  apartmentCode: string;
+  flatNumber: string;
+  recipientName: string;
+  email: string | null;
+  mobile: string | null;
+  active: boolean;
+  loginUrl: string;
+}
+
+export function buildFlatAccountStatusMail(args: FlatAccountStatusNotificationArgs): MailMessage | null {
+  if (!args.email) return null;
+
+  const subject = args.active
+    ? `Your NivasHub access for flat ${args.flatNumber} has been restored`
+    : `Your NivasHub access for flat ${args.flatNumber} has been suspended`;
+
+  const lines: string[] = [
+    `Hello ${args.recipientName},`,
+    "",
+    `This is to let you know that access for flat ${args.flatNumber} at ${args.apartmentName} has been ${
+      args.active ? "reactivated" : "suspended"
+    } by your apartment administration.`,
+    "",
+  ];
+
+  if (args.active) {
+    lines.push(
+      `Your account is now active again. You can log in using the same email and password at:`,
+      `${args.loginUrl}`,
+      "",
+      "If you were previously logged out, please log in again.",
+      "",
+    );
+  } else {
+    lines.push(
+      `Your account has been temporarily suspended until management reactivates it.`,
+      "",
+      `If you need help, please contact your apartment association.`,
+      "",
+    );
+  }
+
+  lines.push(
+    `Apartment code: ${args.apartmentCode}`,
+    "",
+    `If you have questions, contact your apartment management or reply to this email.`,
+    "",
+    `— NivasHub`,
+  );
+
+  return {
+    to: args.email,
+    subject,
+    text: lines.join("\n"),
+  };
+}
+
+export function buildFlatAccountStatusWhatsApp(args: FlatAccountStatusNotificationArgs): WhatsAppMessage | null {
+  if (!args.mobile) return null;
+
+  const lines = [
+    `Hello ${args.recipientName},`,
+    "",
+    `Flat ${args.flatNumber} at ${args.apartmentName} has been ${args.active ? "reactivated" : "suspended"}.`,
+    "",
+    args.active
+      ? `Your account is active again. Log in here: ${args.loginUrl}`
+      : `Your account is suspended until your apartment management reactivates it.`,
+    "",
+    `Apartment code: ${args.apartmentCode}`,
+    "",
+    `If you need help, contact your apartment association.`,
+  ].filter(Boolean) as string[];
+
+  return {
+    to: args.mobile,
+    text: lines.join("\n"),
+  };
+}
+
+export async function sendFlatAccountStatusNotification(
+  args: FlatAccountStatusNotificationArgs,
+): Promise<{ email: boolean; whatsapp: boolean }> {
+  const result = { email: false, whatsapp: false };
+  const mail = buildFlatAccountStatusMail(args);
+  if (mail) {
+    try {
+      await mailer.send(mail);
+      result.email = true;
+    } catch (err) {
+      console.error("[mail] failed to send flat account status notification", err);
+    }
+  }
+
+  const disableWhatsApp = String(process.env.DISABLE_WHATSAPP ?? "false").toLowerCase() === "true";
+  if (!disableWhatsApp) {
+    const wa = buildFlatAccountStatusWhatsApp(args);
+    if (wa) {
+      try {
+        await whatsapp.send(wa);
+        result.whatsapp = true;
+      } catch (err) {
+        console.error("[whatsapp] failed to send flat account status notification", err);
+      }
+    }
+  } else if (!result.email) {
+    console.log("[invite] DISABLE_WHATSAPP=true and no contact channel available — no status notification sent");
   }
 
   return result;

@@ -23,6 +23,21 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return;
   }
 
+  const authUser = await prisma.user.findUnique({
+    where: { id: payload.userId },
+    select: { tokenVersion: true, flatId: true },
+  });
+  if (!authUser) {
+    res.status(401).json({ message: "Not authenticated" });
+    return;
+  }
+
+  const tokenVersion = typeof payload.tokenVersion === "number" ? payload.tokenVersion : 0;
+  if (authUser.tokenVersion !== tokenVersion) {
+    res.status(401).json({ message: "Invalid or expired token" });
+    return;
+  }
+
   // Apartment-suspension gate. Super admin sessions are exempt — they need
   // to stay logged in to re-activate the apartment. For everyone else, if
   // their apartment is suspended we yank the session right here so the
@@ -35,6 +50,20 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     if (!apt || apt.status === "suspended") {
       res.status(401).json({
         message: "Your apartment has been deactivated. Please contact NivasHub.",
+        suspended: true,
+      });
+      return;
+    }
+  }
+
+  if (authUser.flatId) {
+    const flat = await prisma.flat.findUnique({
+      where: { id: authUser.flatId },
+      select: { accountActive: true },
+    });
+    if (!flat || !flat.accountActive) {
+      res.status(401).json({
+        message: "Your account has been suspended. Please contact your Association for assistance.",
         suspended: true,
       });
       return;

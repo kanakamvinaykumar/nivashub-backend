@@ -166,6 +166,9 @@ export interface ReceiptArgs {
   bankName?: string | null;
   bankAccountNumber?: string | null;
   bankIfsc?: string | null;
+  // Optional manual payment metadata
+  paymentMethod?: string | null;
+  transactionRef?: string | null;
 }
 
 // Plain-text receipt body, stored on the receipt row and emailed to the
@@ -194,6 +197,8 @@ export function renderReceiptBody(args: ReceiptArgs): string {
     if (args.bankAccountNumber) lines.push(`A/C No:        ${args.bankAccountNumber}`);
     if (args.bankIfsc) lines.push(`IFSC:          ${args.bankIfsc}`);
   }
+  if (args.paymentMethod) lines.push(`Payment method: ${args.paymentMethod}`);
+  if (args.transactionRef) lines.push(`Transaction ref: ${args.transactionRef}`);
   lines.push("");
   lines.push("This is an electronically generated receipt; no signature required.");
   return lines.join("\n");

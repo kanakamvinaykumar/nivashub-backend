@@ -5,7 +5,16 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { plans } from "../lib/plans.js";
 import { getAssociation } from "../lib/association.js";
-import { buildApartmentWelcomeMail, generateTempPassword, mailer, sendOwnerInvite } from "../lib/mailer.js";
+import {
+  buildApartmentWelcomeMail,
+  buildApartmentAdminWelcomeMail,
+  generateTempPassword,
+  mailer,
+  sendFlatAccountStatusNotification,
+  sendOwnerInvite,
+  sendTenantInvite,
+} from "../lib/mailer.js";
+import { recordActivity, getApartmentActivity } from "../lib/activity.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { notifyVisitorPassCreated, notifyVisitorPassUpdated, notifyAnnouncementCreated } from "../socket.js";
 import { processAttachment } from "../lib/media.js";
@@ -70,6 +79,20 @@ router.get("/apartments/:id/summary", async (req, res) => {
     openListings: listings.length,
     totalDuesInr: totalDues,
   });
+});
+
+router.get("/apartments/:id/activity", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+  const apartment = await prisma.apartment.findUnique({ where: { id: req.params.id } });
+  if (!apartment) {
+    res.status(404).json({ message: "Apartment not found" });
+    return;
+  }
+  const activity = await getApartmentActivity(req.params.id);
+  res.json(activity);
 });
 
 router.get("/apartments/:id/association", async (req, res) => {
@@ -182,6 +205,20 @@ router.post("/apartments/:id/security-members", requireRole("apartment_admin", "
     },
   });
 
+  try {
+    await recordActivity({
+      apartmentId: apartment.id,
+      userId: req.auth?.userId ?? null,
+      userRole: req.auth?.role ?? "apartment_admin",
+      action: "created",
+      entity: "security_member",
+      entityId: user.id,
+      details: `name=${user.name}, email=${user.email}`,
+    });
+  } catch (err) {
+    console.error("[activity] failed to record security member creation", err);
+  }
+
   res.status(201).json(user);
 });
 
@@ -198,6 +235,19 @@ router.delete("/apartments/:id/security-members/:userId", requireRole("apartment
   }
 
   await prisma.user.delete({ where: { id: user.id } });
+  try {
+    await recordActivity({
+      apartmentId: req.params.id,
+      userId: req.auth?.userId ?? null,
+      userRole: req.auth?.role ?? "apartment_admin",
+      action: "deleted",
+      entity: "security_member",
+      entityId: user.id,
+      details: `name=${user.name}, email=${user.email}`,
+    });
+  } catch (err) {
+    console.error("[activity] failed to record security member deletion", err);
+  }
   res.json({ ok: true });
 });
 
@@ -265,6 +315,10 @@ const AnnouncementSchema = z.object({
   attachments: z.array(z.string()).max(5).optional(),
 });
 
+const AnnouncementCommentSchema = z.object({
+  body: z.string().min(1).max(1000).transform((v) => v.trim()),
+});
+
 router.post("/announcements", async (req, res) => {
   const parsed = AnnouncementSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -293,6 +347,69 @@ router.post("/announcements", async (req, res) => {
     createdAt: created.createdAt.toISOString(),
   });
   res.status(201).json(created);
+});
+
+router.get("/announcements/:id/comments", async (req, res) => {
+  const announcement = await prisma.announcement.findUnique({ where: { id: req.params.id } });
+  if (!announcement) {
+    res.status(404).json({ message: "Announcement not found" });
+    return;
+  }
+
+  const comments = await prisma.announcementComment.findMany({
+    where: { announcementId: req.params.id },
+    orderBy: { createdAt: "asc" },
+  });
+  res.json(comments);
+});
+
+router.post("/announcements/:id/comments", async (req, res) => {
+  const parsed = AnnouncementCommentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+
+  const announcement = await prisma.announcement.findUnique({ where: { id: req.params.id } });
+  if (!announcement) {
+    res.status(404).json({ message: "Announcement not found" });
+    return;
+  }
+
+  const user = req.auth?.userId ? await prisma.user.findUnique({ where: { id: req.auth.userId } }) : null;
+
+  const created = await prisma.$transaction(async (tx) => {
+    const comment = await tx.announcementComment.create({
+      data: {
+        announcementId: req.params.id,
+        userId: req.auth?.userId ?? undefined,
+        userName: user?.name ?? "Unknown",
+        userRole: req.auth!.role,
+        body: parsed.data.body,
+      },
+    });
+    await tx.announcement.update({
+      where: { id: req.params.id },
+      data: { commentsCount: { increment: 1 } },
+    });
+    return comment;
+  });
+
+  res.status(201).json(created);
+});
+
+router.patch("/announcements/:id/seen", async (req, res) => {
+  const announcement = await prisma.announcement.findUnique({ where: { id: req.params.id } });
+  if (!announcement) {
+    res.status(404).json({ message: "Announcement not found" });
+    return;
+  }
+
+  const updated = await prisma.announcement.update({
+    where: { id: req.params.id },
+    data: { seenCount: { increment: 1 } },
+  });
+  res.json({ seenCount: updated.seenCount });
 });
 
 router.get("/bookings", async (req, res) => {
@@ -425,7 +542,7 @@ router.post("/apartments", requireRole("super_admin"), async (req, res) => {
   const apartmentId = randomUUID();
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const { apt: createdApartment, committeeAccounts } = await prisma.$transaction(async (tx) => {
       const apt = await tx.apartment.create({
         data: {
           id: apartmentId,
@@ -485,7 +602,56 @@ router.post("/apartments", requireRole("super_admin"), async (req, res) => {
         },
       });
 
-      return apt;
+      const committeeAccountEmails = new Map<string, { name: string; position: string }>();
+      if (committee?.length) {
+        for (const member of committee) {
+          const email = member.email?.trim().toLowerCase();
+          if (!email || email === normalizedEmail || committeeAccountEmails.has(email)) continue;
+          committeeAccountEmails.set(email, { name: member.name, position: member.position });
+        }
+      }
+
+      const committeeAccounts: Array<{ email: string; name: string; position: string; tempPassword: string }> = [];
+      for (const [email, member] of committeeAccountEmails.entries()) {
+        const memberTempPassword = generateTempPassword();
+        const memberPasswordHash = await bcrypt.hash(memberTempPassword, 10);
+        const existingUser = await tx.user.findUnique({ where: { email } });
+
+        if (existingUser) {
+          await tx.user.update({
+            where: { id: existingUser.id },
+            data: {
+              name: member.name,
+              passwordHash: memberPasswordHash,
+              role: "apartment_admin",
+              apartmentId: apt.id,
+              apartmentName: apt.name,
+              mustChangePassword: true,
+            },
+          });
+        } else {
+          await tx.user.create({
+            data: {
+              email,
+              passwordHash: memberPasswordHash,
+              name: member.name,
+              role: "apartment_admin",
+              apartmentId: apt.id,
+              apartmentName: apt.name,
+              mustChangePassword: true,
+            },
+          });
+        }
+
+        committeeAccounts.push({
+          email,
+          name: member.name,
+          position: member.position,
+          tempPassword: memberTempPassword,
+        });
+      }
+
+      return { apt, committeeAccounts };
     });
 
     try {
@@ -493,18 +659,47 @@ router.post("/apartments", requireRole("super_admin"), async (req, res) => {
         ? `${process.env.FRONTEND_ORIGIN.replace(/\/$/, "")}/login`
         : "http://localhost:5173/login";
       await mailer.send(buildApartmentWelcomeMail({
-        apartmentName: created.name,
-        apartmentCode: created.code,
-        adminName: adminName ?? `${created.name} Admin`,
+        apartmentName: createdApartment.name,
+        apartmentCode: createdApartment.code,
+        adminName: adminName ?? `${createdApartment.name} Admin`,
         email: normalizedEmail,
         tempPassword,
         loginUrl,
+      }));
+
+      await Promise.all(committeeAccounts.map(async (account) => {
+        try {
+          await mailer.send(buildApartmentAdminWelcomeMail({
+            apartmentName: createdApartment.name,
+            apartmentCode: createdApartment.code,
+            adminName: account.name,
+            email: account.email,
+            tempPassword: account.tempPassword,
+            loginUrl,
+            position: account.position,
+          }));
+        } catch (mailErr) {
+          console.error("[mail] failed to send committee invite", account.email, mailErr);
+        }
       }));
     } catch (mailErr) {
       console.error("[mail] failed to send welcome email", mailErr);
     }
 
-    res.status(201).json({ apartment: created, adminEmail: normalizedEmail });
+    try {
+      await recordActivity({
+        apartmentId: createdApartment.id,
+        userId: req.auth?.userId ?? null,
+        userRole: req.auth?.role ?? "super_admin",
+        action: "created",
+        entity: "apartment",
+        entityId: createdApartment.id,
+        details: `code=${createdApartment.code}`,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record apartment creation", err);
+    }
+    res.status(201).json({ apartment: createdApartment, adminEmail: normalizedEmail });
   } catch (error: unknown) {
     if (typeof error === "object" && error && "code" in error && (error as any).code === "P2002") {
       res.status(409).json({ message: "Apartment code or registered email already exists" });
@@ -586,6 +781,19 @@ router.patch("/apartments/:id", requireRole("super_admin"), async (req, res) => 
 
   try {
     const updated = await prisma.apartment.update({ where: { id: existing.id }, data });
+    try {
+      await recordActivity({
+        apartmentId: existing.id,
+        userId: req.auth?.userId ?? null,
+        userRole: req.auth?.role ?? "super_admin",
+        action: "updated",
+        entity: "apartment",
+        entityId: existing.id,
+        details: `fields=${Object.keys(data).join(",")}`,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record apartment update", err);
+    }
     res.json(updated);
   } catch (error: unknown) {
     if (typeof error === "object" && error && "code" in error && (error as { code: string }).code === "P2002") {
@@ -634,6 +842,19 @@ router.delete("/apartments/:id", requireRole("super_admin"), async (req, res) =>
       // members cascade automatically.
       await tx.apartment.delete({ where: { id: apartmentId } });
     });
+    try {
+      await recordActivity({
+        apartmentId,
+        userId: req.auth?.userId ?? null,
+        userRole: req.auth?.role ?? "super_admin",
+        action: "deleted",
+        entity: "apartment",
+        entityId: apartmentId,
+        details: "Apartment deleted",
+      });
+    } catch (err) {
+      console.error("[activity] failed to record apartment deletion", err);
+    }
     res.json({ ok: true });
   } catch (error) {
     console.error("[apartment-delete] failed", error);
@@ -677,6 +898,19 @@ router.post("/apartments/:id/blocks", requireRole("apartment_admin", "super_admi
       data: { apartmentId: req.params.id, name: parsed.data.name },
     });
     res.status(201).json({ id: block.id, apartmentId: block.apartmentId, name: block.name, flatCount: 0, createdAt: block.createdAt });
+    try {
+      await recordActivity({
+        apartmentId: req.params.id,
+        userId: req.auth?.userId ?? null,
+        userRole: req.auth?.role ?? "apartment_admin",
+        action: "created",
+        entity: "block",
+        entityId: block.id,
+        details: `name=${block.name}`,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record block creation", err);
+    }
   } catch (error: unknown) {
     if (typeof error === "object" && error && "code" in error && (error as any).code === "P2002") {
       res.status(409).json({ message: "A block with this name already exists in this apartment" });
@@ -714,6 +948,19 @@ router.patch("/apartments/:id/blocks/:blockId", requireRole("apartment_admin", "
     });
     const flatCount = await prisma.flat.count({ where: { blockId: updated.id } });
     res.json({ id: updated.id, apartmentId: updated.apartmentId, name: updated.name, flatCount, createdAt: updated.createdAt });
+    try {
+      await recordActivity({
+        apartmentId: updated.apartmentId,
+        userId: req.auth?.userId ?? null,
+        userRole: req.auth?.role ?? "apartment_admin",
+        action: "updated",
+        entity: "block",
+        entityId: updated.id,
+        details: `name=${updated.name}`,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record block update", err);
+    }
   } catch (error: unknown) {
     if (typeof error === "object" && error && "code" in error && (error as any).code === "P2002") {
       res.status(409).json({ message: "A block with this name already exists in this apartment" });
@@ -740,23 +987,64 @@ router.delete("/apartments/:id/blocks/:blockId", requireRole("apartment_admin", 
     return;
   }
   await prisma.block.delete({ where: { id: existing.id } });
+  try {
+    await recordActivity({
+      apartmentId: existing.apartmentId,
+      userId: req.auth?.userId ?? null,
+      userRole: req.auth?.role ?? "apartment_admin",
+      action: "deleted",
+      entity: "block",
+      entityId: existing.id,
+      details: `name=${existing.name}`,
+    });
+  } catch (err) {
+    console.error("[activity] failed to record block deletion", err);
+  }
   res.json({ ok: true });
 });
 
 // ---------- Flats (creation under a block) ----------
 
-const FlatCreateSchema = z.object({
-  blockId: z.string().min(1),
-  number: z.string().min(1).max(40).transform((v) => v.trim()),
-  ownerName: z.string().min(1).max(120),
-  ownerEmail: z.string().email().optional().nullable().or(z.literal("")),
-  ownerMobile: z.string().max(40).optional().nullable(),
-  occupantType: z.enum(["resident", "tenant"]).default("resident"),
-  tenantName: z.string().max(120).optional().nullable(),
-  residentCount: z.number().int().min(0).max(20).default(0),
-  monthlyMaintenanceInr: z.number().int().min(0).max(1_000_000).default(2000),
-  yearlyAmcInr: z.number().int().min(0).max(10_000_000).default(9000),
-});
+const FlatCreateSchema = z
+  .object({
+    blockId: z.string().min(1),
+    number: z.string().min(1).max(40).transform((v) => v.trim()),
+    ownerName: z.string().min(1).max(120),
+    ownerEmail: z.string().email().optional().nullable().or(z.literal("")),
+    ownerMobile: z.string().max(40).optional().nullable(),
+    occupantType: z.enum(["resident", "tenant"]).default("resident"),
+    tenantName: z.string().max(120).optional().nullable(),
+    tenantEmail: z.string().email().optional().nullable().or(z.literal("")),
+    tenantMobile: z.string().max(40).optional().nullable(),
+    residentCount: z.number().int().min(0).max(20).default(0),
+    monthlyMaintenanceInr: z.number().int().min(0).max(1_000_000).default(2000),
+    yearlyAmcInr: z.number().int().min(0).max(10_000_000).default(9000),
+  })
+  .superRefine((data, ctx) => {
+    if (data.occupantType === "tenant") {
+      if (!data.tenantName || !data.tenantName.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tenantName"],
+          message: "Tenant name is required when occupant type is tenant.",
+        });
+      }
+      if (!data.tenantEmail || !data.tenantEmail.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tenantEmail"],
+          message: "Tenant email is required when occupant type is tenant.",
+        });
+      }
+      if (!data.tenantMobile || !data.tenantMobile.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["tenantMobile"],
+          message: "Tenant phone number is required when occupant type is tenant.",
+        });
+      }
+    }
+  });
 
 // Provision (or re-link) the flat_admin user for a flat, sending a welcome
 // invite on email + WhatsApp when contact details are present. Multiple flats
@@ -866,6 +1154,105 @@ async function provisionFlatOwner(args: {
   return { userId: user.id, created: true, channels };
 }
 
+async function provisionFlatTenant(args: {
+  flatId: string;
+  apartmentId: string;
+  apartmentName: string;
+  apartmentCode: string;
+  flatNumber: string;
+  tenantName: string | null;
+  tenantEmail: string | null;
+  tenantMobile: string | null;
+  ownerEmail: string | null;
+  ownerName: string;
+  ownerMobile: string | null;
+}): Promise<{ userId: string | null; created: boolean; channels: { email: boolean; whatsapp: boolean } } | null> {
+  const email = args.tenantEmail ? args.tenantEmail.toLowerCase().trim() : null;
+  const mobile = args.tenantMobile ? args.tenantMobile.trim() : null;
+  if (!email && !mobile) return null;
+  if (email && args.ownerEmail && email === args.ownerEmail.toLowerCase().trim()) {
+    return null;
+  }
+
+  const loginUrl = process.env.FRONTEND_ORIGIN
+    ? `${process.env.FRONTEND_ORIGIN.replace(/\/$/, "")}/login`
+    : "http://localhost:5173/login";
+
+  const existing = email ? await prisma.user.findUnique({ where: { email } }) : null;
+  if (existing) {
+    if (existing.role !== "flat_admin" || (existing.apartmentId && existing.apartmentId !== args.apartmentId)) {
+      throw new HttpError(409, "Tenant email is already registered to a different account. Use a different email.");
+    }
+    await prisma.flatOwner.upsert({
+      where: { userId_flatId: { userId: existing.id, flatId: args.flatId } },
+      create: { userId: existing.id, flatId: args.flatId },
+      update: {},
+    });
+    if (!existing.apartmentId || !existing.flatId) {
+      await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          apartmentId: existing.apartmentId ?? args.apartmentId,
+          apartmentName: existing.apartmentName ?? args.apartmentName,
+          flatId: existing.flatId ?? args.flatId,
+          flatNumber: existing.flatNumber ?? args.flatNumber,
+          name: args.tenantName ?? existing.name,
+        },
+      });
+    }
+
+    const channels = await sendTenantInvite({
+      apartmentName: args.apartmentName,
+      apartmentCode: args.apartmentCode,
+      flatNumber: args.flatNumber,
+      tenantName: args.tenantName ?? "Tenant",
+      ownerName: args.ownerName,
+      ownerEmail: args.ownerEmail,
+      ownerMobile: args.ownerMobile,
+      email,
+      mobile,
+      tempPassword: null,
+      loginUrl,
+    });
+    return { userId: existing.id, created: false, channels };
+  }
+
+  const tempPassword = email ? generateTempPassword() : null;
+  const userData: any = {
+    name: args.tenantName ?? "Tenant",
+    role: "flat_admin",
+    apartmentId: args.apartmentId,
+    apartmentName: args.apartmentName,
+    flatId: args.flatId,
+    flatNumber: args.flatNumber,
+    mustChangePassword: Boolean(tempPassword),
+  };
+  if (email) {
+    userData.email = email;
+  }
+  if (tempPassword) {
+    userData.passwordHash = await bcrypt.hash(tempPassword, 10);
+  }
+
+  const user = await prisma.user.create({ data: userData });
+  await prisma.flatOwner.create({ data: { userId: user.id, flatId: args.flatId } });
+
+  const channels = await sendTenantInvite({
+    apartmentName: args.apartmentName,
+    apartmentCode: args.apartmentCode,
+    flatNumber: args.flatNumber,
+    tenantName: args.tenantName ?? "Tenant",
+    ownerName: args.ownerName,
+    ownerEmail: args.ownerEmail,
+    ownerMobile: args.ownerMobile,
+    email,
+    mobile,
+    tempPassword,
+    loginUrl,
+  });
+  return { userId: user.id, created: true, channels };
+}
+
 class HttpError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -900,6 +1287,10 @@ router.post("/apartments/:id/flats", requireRole("apartment_admin", "super_admin
     const ownerEmail = parsed.data.ownerEmail ? parsed.data.ownerEmail.toLowerCase().trim() : null;
     const ownerMobile = parsed.data.ownerMobile?.trim() || null;
 
+    const tenantEmail = parsed.data.tenantEmail ? parsed.data.tenantEmail.toLowerCase().trim() : null;
+    const tenantMobile = parsed.data.tenantMobile?.trim() || null;
+    const tenantName = parsed.data.occupantType === "tenant" ? (parsed.data.tenantName ?? null) : null;
+
     const flat = await prisma.flat.create({
       data: {
         id: randomUUID(),
@@ -911,7 +1302,9 @@ router.post("/apartments/:id/flats", requireRole("apartment_admin", "super_admin
         ownerEmail,
         ownerMobile,
         occupantType: parsed.data.occupantType,
-        tenantName: parsed.data.occupantType === "tenant" ? (parsed.data.tenantName ?? null) : null,
+        tenantName,
+        tenantEmail,
+        tenantMobile,
         residentCount: parsed.data.residentCount,
         status: parsed.data.occupantType === "tenant" ? "rented" : (parsed.data.residentCount > 0 ? "occupied" : "vacant"),
         pendingDuesInr: 0,
@@ -920,9 +1313,10 @@ router.post("/apartments/:id/flats", requireRole("apartment_admin", "super_admin
       },
     });
 
-    let invite: Awaited<ReturnType<typeof provisionFlatOwner>> = null;
+    let ownerInvite: Awaited<ReturnType<typeof provisionFlatOwner>> = null;
+    let tenantInvite: Awaited<ReturnType<typeof provisionFlatTenant>> = null;
     try {
-      invite = await provisionFlatOwner({
+      ownerInvite = await provisionFlatOwner({
         flatId: flat.id,
         apartmentId,
         apartmentName: apartment.name,
@@ -940,7 +1334,44 @@ router.post("/apartments/:id/flats", requireRole("apartment_admin", "super_admin
       console.error("[flat] provisionFlatOwner failed", err);
     }
 
-    res.status(201).json({ flat, invite });
+    if (parsed.data.occupantType === "tenant") {
+      try {
+        tenantInvite = await provisionFlatTenant({
+          flatId: flat.id,
+          apartmentId,
+          apartmentName: apartment.name,
+          apartmentCode: apartment.code,
+          flatNumber: flat.number,
+          tenantName,
+          tenantEmail,
+          tenantMobile,
+          ownerEmail,
+          ownerName: flat.ownerName,
+          ownerMobile,
+        });
+      } catch (err) {
+        if (err instanceof HttpError) {
+          res.status(err.status).json({ message: err.message, flat });
+          return;
+        }
+        console.error("[flat] provisionFlatTenant failed", err);
+      }
+    }
+
+    try {
+      await recordActivity({
+        apartmentId,
+        userId: req.auth?.userId ?? null,
+        userRole: req.auth?.role ?? "apartment_admin",
+        action: "created",
+        entity: "flat",
+        entityId: flat.id,
+        details: `block=${block.name},number=${flat.number},owner=${flat.ownerName}`,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record flat creation", err);
+    }
+    res.status(201).json({ flat, ownerInvite, tenantInvite });
   } catch (error: unknown) {
     console.error(error);
     res.status(500).json({ message: "Unable to create flat" });
@@ -965,6 +1396,8 @@ const BulkRowSchema = z.object({
   ownerMobile: z.string().max(40).optional().nullable(),
   occupantType: z.enum(["resident", "tenant"]).optional(),
   tenantName: z.string().max(120).optional().nullable(),
+  tenantEmail: z.string().email().optional().nullable().or(z.literal("")),
+  tenantMobile: z.string().max(40).optional().nullable(),
   residentCount: z.number().int().min(0).max(20).optional(),
   pendingDuesInr: z.number().int().min(0).optional(),
   monthlyMaintenanceInr: z.number().int().min(0).max(1_000_000).optional(),
@@ -1028,6 +1461,8 @@ router.post(
         ownerMobile: raw.ownerMobile === "" ? null : raw.ownerMobile,
         occupantType: raw.occupantType || undefined,
         tenantName: raw.tenantName === "" ? null : raw.tenantName,
+        tenantEmail: raw.tenantEmail === "" ? null : raw.tenantEmail,
+        tenantMobile: raw.tenantMobile === "" ? null : raw.tenantMobile,
         residentCount:
           raw.residentCount === undefined || raw.residentCount === null || raw.residentCount === ""
             ? undefined
@@ -1145,6 +1580,8 @@ router.get("/apartments/:id/flats/export.csv", async (req, res) => {
     "ownerMobile",
     "occupantType",
     "tenantName",
+    "tenantEmail",
+    "tenantMobile",
     "residentCount",
     "status",
     "pendingDuesInr",
@@ -1169,6 +1606,8 @@ router.get("/apartments/:id/flats/export.csv", async (req, res) => {
         f.ownerMobile ?? "",
         f.occupantType,
         f.tenantName ?? "",
+        f.tenantEmail ?? "",
+        f.tenantMobile ?? "",
         f.residentCount,
         f.status,
         f.pendingDuesInr,
@@ -1201,9 +1640,13 @@ const FlatAdminPatchSchema = z.object({
 const FlatFullPatchSchema = FlatAdminPatchSchema.extend({
   number: z.string().min(1).max(40).optional(),
   ownerEmail: z.string().email().optional().nullable().or(z.literal("")),
+  ownerMobile: z.string().max(40).optional().nullable(),
   occupantType: z.enum(["resident", "tenant"]).optional(),
   tenantName: z.string().max(120).optional().nullable(),
+  tenantEmail: z.string().email().optional().nullable().or(z.literal("")),
+  tenantMobile: z.string().max(40).optional().nullable(),
   status: z.enum(["occupied", "vacant", "rented"]).optional(),
+  accountActive: z.boolean().optional(),
   pendingDuesInr: z.number().int().min(0).optional(),
   monthlyMaintenanceInr: z.number().int().min(0).max(1_000_000).optional(),
   yearlyAmcInr: z.number().int().min(0).max(10_000_000).optional(),
@@ -1253,19 +1696,31 @@ router.patch("/flats/:id", async (req, res) => {
     if (parsed.data.ownerEmail !== undefined) {
       data.ownerEmail = parsed.data.ownerEmail ? parsed.data.ownerEmail.toLowerCase().trim() : null;
     }
+    if (parsed.data.ownerMobile !== undefined) {
+      data.ownerMobile = parsed.data.ownerMobile ? parsed.data.ownerMobile.trim() : null;
+    }
     if (parsed.data.residentCount !== undefined) data.residentCount = parsed.data.residentCount;
     if (parsed.data.number !== undefined) data.number = parsed.data.number.trim();
     if (parsed.data.occupantType !== undefined) data.occupantType = parsed.data.occupantType;
     if (parsed.data.tenantName !== undefined) {
       data.tenantName = parsed.data.tenantName ? parsed.data.tenantName.trim() : null;
     }
+    if (parsed.data.tenantEmail !== undefined) {
+      data.tenantEmail = parsed.data.tenantEmail ? parsed.data.tenantEmail.toLowerCase().trim() : null;
+    }
+    if (parsed.data.tenantMobile !== undefined) {
+      data.tenantMobile = parsed.data.tenantMobile ? parsed.data.tenantMobile.trim() : null;
+    }
     if (parsed.data.status !== undefined) data.status = parsed.data.status;
+    if (parsed.data.accountActive !== undefined) data.accountActive = parsed.data.accountActive;
     if (parsed.data.pendingDuesInr !== undefined) data.pendingDuesInr = parsed.data.pendingDuesInr;
     if (parsed.data.monthlyMaintenanceInr !== undefined) data.monthlyMaintenanceInr = parsed.data.monthlyMaintenanceInr;
     if (parsed.data.yearlyAmcInr !== undefined) data.yearlyAmcInr = parsed.data.yearlyAmcInr;
-    // if occupantType flipped to resident, clear tenantName
-    if (parsed.data.occupantType === "resident" && parsed.data.tenantName === undefined) {
-      data.tenantName = null;
+    // if occupantType flipped to resident, clear tenant contact details
+    if (parsed.data.occupantType === "resident") {
+      if (parsed.data.tenantName === undefined) data.tenantName = null;
+      if (parsed.data.tenantEmail === undefined) data.tenantEmail = null;
+      if (parsed.data.tenantMobile === undefined) data.tenantMobile = null;
     }
   } else {
     res.status(403).json({ message: "Forbidden" });
@@ -1280,8 +1735,6 @@ router.patch("/flats/:id", async (req, res) => {
   try {
     const updated = await prisma.flat.update({ where: { id: flat.id }, data });
 
-    // If an apartment_admin/super_admin changed the contact details, re-run
-    // the provisioning logic so a fresh email/mobile gets an invite.
     let invite: Awaited<ReturnType<typeof provisionFlatOwner>> = null;
     if (
       (role === "apartment_admin" || role === "super_admin") &&
@@ -1311,6 +1764,69 @@ router.patch("/flats/:id", async (req, res) => {
       }
     }
 
+    const becameInactive = data.accountActive === false && flat.accountActive === true;
+    const becameActive = data.accountActive === true && flat.accountActive === false;
+    if ((becameInactive || becameActive) && (role === "apartment_admin" || role === "super_admin")) {
+      const apartment = await prisma.apartment.findUnique({
+        where: { id: updated.apartmentId },
+        select: { name: true, code: true },
+      });
+      if (apartment) {
+        try {
+          if (becameInactive) {
+            await prisma.user.updateMany({
+              where: { flatId: updated.id },
+              data: { tokenVersion: { increment: 1 } },
+            });
+          }
+
+          const loginUrl = process.env.FRONTEND_ORIGIN
+            ? `${process.env.FRONTEND_ORIGIN.replace(/\/$/, "")}/login`
+            : "http://localhost:5173/login";
+
+          await Promise.all([
+            sendFlatAccountStatusNotification({
+              apartmentName: apartment.name,
+              apartmentCode: apartment.code,
+              flatNumber: updated.number,
+              recipientName: updated.ownerName,
+              email: updated.ownerEmail,
+              mobile: updated.ownerMobile,
+              active: becameActive,
+              loginUrl,
+            }),
+            updated.occupantType === "tenant" && updated.tenantEmail
+              ? sendFlatAccountStatusNotification({
+                  apartmentName: apartment.name,
+                  apartmentCode: apartment.code,
+                  flatNumber: updated.number,
+                  recipientName: updated.tenantName ?? "Tenant",
+                  email: updated.tenantEmail,
+                  mobile: updated.tenantMobile,
+                  active: becameActive,
+                  loginUrl,
+                })
+              : Promise.resolve({ email: false, whatsapp: false }),
+          ]);
+        } catch (err) {
+          console.error("[flat] account status notification failed", err);
+        }
+      }
+    }
+
+    try {
+      await recordActivity({
+        apartmentId: updated.apartmentId,
+        userId: req.auth?.userId ?? null,
+        userRole: req.auth?.role ?? "apartment_admin",
+        action: "updated",
+        entity: "flat",
+        entityId: updated.id,
+        details: `fields=${Object.keys(data).join(",")}`,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record flat update", err);
+    }
     res.json({ flat: updated, invite });
   } catch (error: unknown) {
     console.error(error);
@@ -1420,6 +1936,19 @@ router.delete("/flats/:id", requireRole("apartment_admin", "super_admin"), async
       prisma.resident.deleteMany({ where: { flatId: flat.id } }),
       prisma.flat.delete({ where: { id: flat.id } }),
     ]);
+    try {
+      await recordActivity({
+        apartmentId: flat.apartmentId,
+        userId: req.auth?.userId ?? null,
+        userRole: req.auth?.role ?? "apartment_admin",
+        action: "deleted",
+        entity: "flat",
+        entityId: flat.id,
+        details: `block=${flat.block},number=${flat.number}`,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record flat deletion", err);
+    }
     res.json({ ok: true });
   } catch (error: unknown) {
     console.error(error);

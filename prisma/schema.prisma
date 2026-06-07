@@ -144,12 +144,15 @@ model User {
   shift              Shift?
   notes              String?
   mustChangePassword Boolean  @default(false)
+  tokenVersion       Int      @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
   apartment  Apartment?  @relation(fields: [apartmentId], references: [id])
   flat       Flat?       @relation(fields: [flatId], references: [id])
   ownedFlats FlatOwner[]
+  announcementComments AnnouncementComment[]
+  activityLogs ActivityLog[]
 }
 
 model Apartment {
@@ -190,6 +193,7 @@ model Apartment {
   complaints      Complaint[]
   maintenanceDues MaintenanceDue[]
   payments        MaintenancePayment[]
+  activityLogs    ActivityLog[]
 }
 
 model Block {
@@ -215,8 +219,11 @@ model Flat {
   ownerMobile           String?
   occupantType          OccupantType @default(resident)
   tenantName            String?
+  tenantEmail           String?
+  tenantMobile          String?
   residentCount         Int
   status                FlatStatus
+  accountActive         Boolean      @default(true)
   pendingDuesInr        Int
   // Maintenance billing — per-flat overrides. Defaults match the
   // typical ₹2 000 / month and ₹9 000 / year AMC + water + tax bundle.
@@ -276,6 +283,25 @@ model CommitteeMember {
   apartment Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
 }
 
+model ActivityLog {
+  id         String   @id @default(cuid())
+  apartmentId String
+  userId     String?  
+  userRole   Role
+  userName   String?
+  userEmail  String?
+  action     String
+  entity     String
+  entityId   String?
+  details    String?
+  createdAt  DateTime @default(now())
+
+  apartment Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([apartmentId, createdAt])
+}
+
 model Resident {
   id       String @id
   flatId   String
@@ -300,6 +326,23 @@ model Announcement {
   createdAt     DateTime @default(now())
 
   apartment Apartment @relation(fields: [apartmentId], references: [id])
+  comments    AnnouncementComment[]
+}
+
+model AnnouncementComment {
+  id             String   @id @default(cuid())
+  announcementId String
+  userId         String?
+  userName       String
+  userRole       Role
+  body           String
+  createdAt      DateTime @default(now())
+
+  announcement Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  user         User?       @relation(fields: [userId], references: [id])
+
+  @@index([announcementId])
+  @@index([userId])
 }
 
 model Booking {

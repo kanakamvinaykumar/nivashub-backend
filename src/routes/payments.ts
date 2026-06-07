@@ -21,6 +21,7 @@ import {
   buildPaymentSubmittedOwnerMail,
   mailer,
 } from "../lib/mailer.js";
+import { recordActivity } from "../lib/activity.js";
 import {
   notifyPaymentSubmitted,
   notifyPaymentApproved,
@@ -381,6 +382,164 @@ router.post("/", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /payments/manual  (apartment_admin / super_admin)
+// Body: { flatId, dueIds: string[], method?, transactionRef?, remarks? }
+// Creates a payment for selected dues and marks it approved immediately.
+// ---------------------------------------------------------------------------
+const ManualPaymentSchema = z.object({
+  flatId: z.string().min(1),
+  dueIds: z.array(z.string().min(1)).min(1).max(60),
+  method: z
+    .enum(["cash", "upi", "bank_transfer", "cheque", "other"]) // optional
+    .optional()
+    .nullable(),
+  transactionRef: z.string().max(200).optional().nullable(),
+  remarks: z.string().max(2000).optional().nullable(),
+});
+
+router.post(
+  "/manual",
+  requireRole("apartment_admin", "super_admin"),
+  async (req, res) => {
+    const parsed = ManualPaymentSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ message: "Invalid body", errors: parsed.error.flatten() });
+      return;
+    }
+    const { flatId, dueIds } = parsed.data;
+    const flat = await prisma.flat.findUnique({ where: { id: flatId }, include: { apartment: true } });
+    if (!flat) {
+      res.status(404).json({ message: "Flat not found" });
+      return;
+    }
+    if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== flat.apartmentId) {
+      res.status(403).json({ message: "Forbidden — wrong apartment" });
+      return;
+    }
+
+    const dues = await prisma.maintenanceDue.findMany({ where: { id: { in: dueIds }, flatId: flat.id }, orderBy: [{ year: "asc" }, { month: "asc" }] });
+    if (dues.length !== dueIds.length) {
+      res.status(400).json({ message: "Some selected dues don't belong to this flat" });
+      return;
+    }
+    const blocked = dues.find((d) => d.status !== "pending" && d.status !== "pending_verification");
+    if (blocked) {
+      res.status(409).json({ message: `Month ${monthLabel(blocked.year, blocked.month)} is already ${blocked.status.replace("_", " ")}` });
+      return;
+    }
+
+    const amount = dues.reduce((s, d) => s + d.amountInr, 0);
+    const base = buildPaymentReference({ apartmentCode: flat.apartment.code, flatNumber: flat.number, months: dues.map((d) => ({ year: d.year, month: d.month })) });
+    const reference = await uniquePaymentReference(base);
+
+    const verifier = await prisma.user.findUnique({ where: { id: req.auth!.userId } });
+    const verifierName = verifier?.name ?? "Apartment admin";
+    const receiptNumber = await nextReceiptNumber(flat.apartment.code);
+    const issuedAt = new Date();
+
+    const method = parsed.data.method?.trim() || null;
+    const transactionRef = parsed.data.transactionRef?.trim() || null;
+
+    const body = renderReceiptBody({
+      receiptNumber,
+      apartmentName: flat.apartment.name,
+      apartmentCode: flat.apartment.code,
+      flatNumber: flat.number,
+      blockName: flat.block,
+      paidByName: flat.ownerName,
+      amountInr: amount,
+      reference,
+      months: dues.map((m) => ({ year: m.year, month: m.month, amountInr: m.amountInr })),
+      issuedAt,
+      upiId: flat.apartment.upiId,
+      bankName: flat.apartment.bankName,
+      bankAccountNumber: flat.apartment.bankAccountNumber,
+      bankIfsc: flat.apartment.bankIfsc,
+      paymentMethod: method,
+      transactionRef,
+    });
+
+    const payment = await prisma.$transaction(async (tx) => {
+      const created = await tx.maintenancePayment.create({
+        data: {
+          reference,
+          apartmentId: flat.apartmentId,
+          flatId: flat.id,
+          flatNumber: flat.number,
+          blockName: flat.block,
+          paidByUserId: null,
+          paidByName: flat.ownerName,
+          amountInr: amount,
+          upiLink: buildUpiLink({ upiId: flat.apartment.upiId || "", payeeName: flat.apartment.upiPayeeName || flat.apartment.name, amountInr: amount, transactionNote: reference }),
+          transactionNote: reference,
+          status: "approved",
+          verifiedAt: issuedAt,
+          verifiedByUserId: req.auth!.userId,
+          verifiedByName: verifierName,
+          adminRemarks: (parsed.data.remarks?.trim() ?? "") + (method ? `\n\n[Marked paid manually]\nMethod: ${method}` : "") + (transactionRef ? `\nTransaction ref: ${transactionRef}` : ""),
+          receiptNumber,
+          receiptIssuedAt: issuedAt,
+        },
+      });
+      await tx.paymentMonth.createMany({ data: dues.map((d) => ({ paymentId: created.id, dueId: d.id, year: d.year, month: d.month, amountInr: d.amountInr })) });
+      await tx.maintenanceDue.updateMany({ where: { id: { in: dues.map((d) => d.id) } }, data: { status: "paid", paidAt: issuedAt, paymentId: created.id } });
+      await tx.paymentReceipt.create({ data: { paymentId: created.id, receiptNumber, amountInr: amount, issuedAt, body } });
+
+      const remaining = await tx.maintenanceDue.aggregate({ where: { flatId: flat.id, status: { in: ["pending", "pending_verification"] } }, _sum: { amountInr: true } });
+      await tx.flat.update({ where: { id: flat.id }, data: { pendingDuesInr: remaining._sum.amountInr ?? 0 } });
+      return created;
+    });
+
+    try {
+      const notificationData: PaymentNotificationData = {
+        id: payment.id,
+        reference: payment.reference,
+        apartmentId: payment.apartmentId,
+        flatId: payment.flatId,
+        flatNumber: payment.flatNumber,
+        blockName: payment.blockName,
+        paidByName: payment.paidByName,
+        amountInr: payment.amountInr,
+        status: payment.status,
+        submittedAt: payment.submittedAt.toISOString(),
+      };
+      notifyPaymentApproved(notificationData);
+      if (flat.ownerEmail) {
+        await mailer.send(buildPaymentApprovedOwnerMail({
+          to: flat.ownerEmail,
+          ownerName: payment.paidByName,
+          apartmentName: flat.apartment.name,
+          flatNumber: payment.flatNumber,
+          reference: payment.reference,
+          amountInr: payment.amountInr,
+          months: monthsLabel(dues),
+          receiptNumber,
+          loginUrl: loginUrl(),
+        }));
+      }
+    } catch (err) {
+      console.error("[mail] manual-payment notification failed", err);
+    }
+
+    try {
+      await recordActivity({
+        apartmentId: flat.apartmentId,
+        userId: req.auth!.userId ?? null,
+        userRole: req.auth!.role,
+        action: "manual_mark_paid",
+        entity: "payment",
+        entityId: payment.id,
+        details: [`method=${method || "unspecified"}`, transactionRef ? `transactionRef=${transactionRef}` : null, parsed.data.remarks ? `remarks=${parsed.data.remarks.trim()}` : null].filter(Boolean).join("; ") || null,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record manual payment", err);
+    }
+
+    res.status(201).json(payment);
+  },
+);
+
+// ---------------------------------------------------------------------------
 // POST /payments/:id/screenshot
 // Body: { dataUrl: "data:image/png;base64,..." }
 // Accepts a single base64-encoded image up to ~6 MB. If Cloudinary is
@@ -650,6 +809,11 @@ router.get("/:id", async (req, res) => {
 // ---------------------------------------------------------------------------
 const VerifySchema = z.object({
   remarks: z.string().max(2000).optional().nullable(),
+  method: z
+    .enum(["cash", "upi", "bank_transfer", "cheque", "other"])
+    .optional()
+    .nullable(),
+  transactionRef: z.string().max(200).optional().nullable(),
 });
 
 router.post(
@@ -686,6 +850,9 @@ router.post(
     const verifierName = verifier?.name ?? "Apartment admin";
     const receiptNumber = await nextReceiptNumber(payment.apartment.code);
     const issuedAt = new Date();
+    const method = parsed.data.method?.trim() || null;
+    const transactionRef = parsed.data.transactionRef?.trim() || null;
+
     const body = renderReceiptBody({
       receiptNumber,
       apartmentName: payment.apartment.name,
@@ -701,6 +868,8 @@ router.post(
       bankName: payment.apartment.bankName,
       bankAccountNumber: payment.apartment.bankAccountNumber,
       bankIfsc: payment.apartment.bankIfsc,
+      paymentMethod: method,
+      transactionRef,
     });
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -711,7 +880,11 @@ router.post(
           verifiedAt: issuedAt,
           verifiedByUserId: req.auth!.userId,
           verifiedByName: verifierName,
-          adminRemarks: parsed.data.remarks?.trim() || null,
+          // Persist admin remarks and include manual payment metadata for audit.
+          adminRemarks:
+            (parsed.data.remarks?.trim() ?? "") +
+            (method ? `\n\n[Marked paid manually]\nMethod: ${method}` : "") +
+            (transactionRef ? `\nTransaction ref: ${transactionRef}` : "") || null,
           receiptNumber,
           receiptIssuedAt: issuedAt,
         },
@@ -774,6 +947,25 @@ router.post(
       }
     } catch (err) {
       console.error("[mail] payment-approved notification failed", err);
+    }
+
+    try {
+      // Record activity for manual/administrative approval.
+      const detailsParts: string[] = [];
+      if (method) detailsParts.push(`method=${method}`);
+      if (transactionRef) detailsParts.push(`transactionRef=${transactionRef}`);
+      if (parsed.data.remarks) detailsParts.push(`remarks=${parsed.data.remarks.trim()}`);
+      await recordActivity({
+        apartmentId: payment.apartmentId,
+        userId: req.auth!.userId ?? null,
+        userRole: req.auth!.role,
+        action: "approved",
+        entity: "payment",
+        entityId: payment.id,
+        details: detailsParts.join("; ") || null,
+      });
+    } catch (err) {
+      console.error("[activity] failed to record payment approval", err);
     }
 
     res.json(updated);

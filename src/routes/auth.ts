@@ -70,11 +70,26 @@ router.post("/login", async (req, res) => {
     }
   }
 
+  if (user.flatId) {
+    const flat = await prisma.flat.findUnique({
+      where: { id: user.flatId },
+      select: { accountActive: true },
+    });
+    if (!flat || !flat.accountActive) {
+      res.status(401).json({
+        message: "Your account has been suspended. Please contact your Association for assistance.",
+        suspended: true,
+      });
+      return;
+    }
+  }
+
   const token = signToken({
     userId: user.id,
     role: user.role,
     apartmentId: user.apartmentId,
     flatId: user.flatId,
+    tokenVersion: user.tokenVersion ?? 0,
   });
 
   res.json({
@@ -88,6 +103,7 @@ router.post("/login", async (req, res) => {
       apartmentName: user.apartmentName,
       flatId: user.flatId,
       flatNumber: user.flatNumber,
+      mustChangePassword: user.mustChangePassword,
     },
   });
 });
@@ -112,6 +128,7 @@ router.get("/me", requireAuth, async (req, res) => {
     apartmentName: user.apartmentName,
     flatId: user.flatId,
     flatNumber: user.flatNumber,
+    mustChangePassword: user.mustChangePassword,
   });
 });
 
@@ -128,7 +145,7 @@ router.patch("/me", requireAuth, async (req, res) => {
     return;
   }
 
-  const updateData: { name?: string; passwordHash?: string } = {};
+  const updateData: { name?: string; passwordHash?: string; mustChangePassword?: boolean } = {};
   if (parsed.data.name && parsed.data.name !== user.name) {
     updateData.name = parsed.data.name;
   }
@@ -140,6 +157,7 @@ router.patch("/me", requireAuth, async (req, res) => {
       return;
     }
     updateData.passwordHash = await bcrypt.hash(parsed.data.newPassword, 10);
+    updateData.mustChangePassword = false;
   }
 
   const updatedUser = updateData.name || updateData.passwordHash

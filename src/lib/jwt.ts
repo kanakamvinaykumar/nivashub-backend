@@ -8,6 +8,7 @@ export interface JwtPayload {
   role: "super_admin" | "apartment_admin" | "flat_admin" | "security";
   apartmentId: string | null;
   flatId: string | null;
+  tokenVersion: number;
 }
 
 export function signToken(payload: JwtPayload): string {

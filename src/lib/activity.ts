@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Role } from "@prisma/client";
 import { prisma } from "./prisma.js";
 
 export interface ActivityItem {
@@ -8,6 +9,70 @@ export interface ActivityItem {
   subtitle: string;
   apartmentName: string;
   createdAt: string;
+}
+
+export interface ApartmentActivityLogEntry {
+  id: string;
+  apartmentId: string;
+  userId: string | null;
+  userRole: Role;
+  userName: string | null;
+  userEmail: string | null;
+  action: string;
+  entity: string;
+  entityId: string | null;
+  details: string | null;
+  createdAt: string;
+}
+
+export async function recordActivity(args: {
+  apartmentId: string;
+  userId?: string | null;
+  userRole: Role;
+  action: string;
+  entity: string;
+  entityId?: string | null;
+  details?: string | null;
+}): Promise<void> {
+  const user = args.userId ? await prisma.user.findUnique({ where: { id: args.userId } }) : null;
+  await prisma.activityLog.create({
+    data: {
+      apartmentId: args.apartmentId,
+      userId: args.userId,
+      userRole: args.userRole,
+      userName: user?.name ?? null,
+      userEmail: user?.email ?? null,
+      action: args.action,
+      entity: args.entity,
+      entityId: args.entityId ?? null,
+      details: args.details ?? null,
+    },
+  });
+}
+
+export async function getApartmentActivity(apartmentId: string): Promise<ApartmentActivityLogEntry[]> {
+  const rows = await prisma.activityLog.findMany({
+    where: { apartmentId },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      apartmentId: true,
+      userId: true,
+      userRole: true,
+      userName: true,
+      userEmail: true,
+      action: true,
+      entity: true,
+      entityId: true,
+      details: true,
+      createdAt: true,
+    },
+  });
+
+  return rows.map((row) => ({
+    ...row,
+    createdAt: row.createdAt.toISOString(),
+  }));
 }
 
 export interface RevenuePoint {
