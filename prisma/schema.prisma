@@ -162,6 +162,7 @@ model Apartment {
   city            String
   address         String
   registeredEmail String?
+  logoUrl         String?
   totalFlats      Int
   occupiedFlats   Int
   planTier        String

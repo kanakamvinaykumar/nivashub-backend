@@ -42,6 +42,45 @@ router.get("/apartments/:id", async (req, res) => {
   res.json(apt);
 });
 
+const ApartmentLogoSchema = z.object({
+  logoUrl: z.string().min(1).optional().nullable(),
+});
+
+router.patch("/apartments/:id/logo", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+  const parsed = ApartmentLogoSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+
+  const existing = await prisma.apartment.findUnique({ where: { id: req.params.id } });
+  if (!existing) {
+    res.status(404).json({ message: "Apartment not found" });
+    return;
+  }
+
+  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+
+  let storedLogo: string | null = null;
+  if (parsed.data.logoUrl) {
+    const rawLogo = parsed.data.logoUrl.trim();
+    if (!rawLogo.startsWith("data:image/") && !/^https?:\/\//.test(rawLogo)) {
+      res.status(400).json({ message: "Logo must be an image data URL or a valid URL." });
+      return;
+    }
+    storedLogo = await processAttachment(rawLogo, `apartment_logo_${req.params.id}`);
+  }
+
+  const updated = await prisma.apartment.update({
+    where: { id: existing.id },
+    data: { logoUrl: storedLogo },
+  });
+  res.json({ logoUrl: updated.logoUrl });
+});
+
 router.get("/apartments/:id/flats", async (req, res) => {
   const flats = await prisma.flat.findMany({
     where: { apartmentId: req.params.id },
@@ -802,6 +841,65 @@ router.patch("/apartments/:id", requireRole("super_admin"), async (req, res) => 
     }
     console.error(error);
     res.status(500).json({ message: "Unable to update apartment" });
+  }
+});
+
+router.post("/apartments/:id/resend-admin-invite", requireRole("super_admin"), async (req, res) => {
+  const apartment = await prisma.apartment.findUnique({ where: { id: req.params.id } });
+  if (!apartment) {
+    res.status(404).json({ message: "Apartment not found" });
+    return;
+  }
+  if (!apartment.registeredEmail) {
+    res.status(400).json({ message: "This apartment has no registered admin email." });
+    return;
+  }
+
+  const loginUrl = process.env.FRONTEND_ORIGIN
+    ? `${process.env.FRONTEND_ORIGIN.replace(/\/$/, "")}/login`
+    : "http://localhost:5173/login";
+  const email = apartment.registeredEmail.toLowerCase().trim();
+  const existingUser = await prisma.user.findUnique({ where: { email } });
+  const adminName = existingUser?.name ?? `${apartment.name} Admin`;
+  const tempPassword = generateTempPassword();
+  const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+  if (existingUser) {
+    if (existingUser.role !== "apartment_admin" || existingUser.apartmentId !== apartment.id) {
+      res.status(409).json({ message: "Email is registered to a different account." });
+      return;
+    }
+    await prisma.user.update({
+      where: { id: existingUser.id },
+      data: { passwordHash, mustChangePassword: true },
+    });
+  } else {
+    await prisma.user.create({
+      data: {
+        email,
+        passwordHash,
+        name: adminName,
+        role: "apartment_admin",
+        apartmentId: apartment.id,
+        apartmentName: apartment.name,
+        mustChangePassword: true,
+      },
+    });
+  }
+
+  try {
+    await mailer.send(buildApartmentWelcomeMail({
+      apartmentName: apartment.name,
+      apartmentCode: apartment.code,
+      adminName,
+      email,
+      tempPassword,
+      loginUrl,
+    }));
+    res.json({ ok: true, passwordRotated: true });
+  } catch (error) {
+    console.error("[mail] failed to resend apartment admin login details", error);
+    res.status(500).json({ message: "Unable to resend apartment admin login details." });
   }
 });
 

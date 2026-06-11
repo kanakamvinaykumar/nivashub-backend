@@ -41,6 +41,10 @@ router.post("/login", async (req, res) => {
     res.status(401).json({ message: "Invalid email or password" });
     return;
   }
+
+  const apartment = user.apartmentId
+    ? await prisma.apartment.findUnique({ where: { id: user.apartmentId }, select: { logoUrl: true } })
+    : null;
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) {
     res.status(401).json({ message: "Invalid email or password" });
@@ -101,6 +105,7 @@ router.post("/login", async (req, res) => {
       role: user.role,
       apartmentId: user.apartmentId,
       apartmentName: user.apartmentName,
+      apartmentLogoUrl: apartment?.logoUrl ?? null,
       flatId: user.flatId,
       flatNumber: user.flatNumber,
       mustChangePassword: user.mustChangePassword,
@@ -119,6 +124,11 @@ router.get("/me", requireAuth, async (req, res) => {
     res.status(401).json({ message: "Not authenticated" });
     return;
   }
+
+  const apartment = user.apartmentId
+    ? await prisma.apartment.findUnique({ where: { id: user.apartmentId }, select: { logoUrl: true } })
+    : null;
+
   res.json({
     id: user.id,
     email: user.email,
@@ -126,6 +136,7 @@ router.get("/me", requireAuth, async (req, res) => {
     role: user.role,
     apartmentId: user.apartmentId,
     apartmentName: user.apartmentName,
+    apartmentLogoUrl: apartment?.logoUrl ?? null,
     flatId: user.flatId,
     flatNumber: user.flatNumber,
     mustChangePassword: user.mustChangePassword,
