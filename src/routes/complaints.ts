@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ComplaintStatus, Prisma, Role } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireCommitteeOrRole, requireApartmentAccess, hasApartmentAccess } from "../lib/committee.js";
 import {
   buildComplaintCreatedAdminMail,
   buildComplaintReplyMail,
@@ -12,6 +13,7 @@ import {
 } from "../lib/mailer.js";
 import { notifyComplaintMessage } from "../socket.js";
 import { processAttachment } from "../lib/media.js";
+import { notifyFlatOwnersPush, notifyApartmentRolePush } from "../lib/notify-push.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -138,7 +140,15 @@ router.post("/", async (req, res) => {
     },
   });
 
-  // Notify apartment admins.
+  // Notify apartment admins via push.
+  notifyApartmentRolePush(flat.apartmentId, ["apartment_admin"], {
+    title: "New complaint raised",
+    body: `${complaint.flatNumber}: ${complaint.title}`,
+    data: { type: "complaint_created", complaintId: complaint.id },
+    clickAction: `/complaints/${complaint.id}`,
+  }).catch((err: unknown) => console.error("[push] complaint-created notification failed", err));
+
+  // Notify apartment admins via email.
   if (COMPLAINT_EMAILS_ENABLED) {
     try {
       const admins = await findAdminEmails(flat.apartmentId);
@@ -169,9 +179,10 @@ router.post("/", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // GET /complaints  — list with filters
-//   flat_admin:      always restricted to their own flatId
-//   apartment_admin: restricted to their apartmentId; can filter by flatId
-//   super_admin:     unrestricted; can filter by apartmentId/flatId
+//   flat_admin (no committee):  restricted to their own flatId
+//   committee member:           sees all complaints for their apartment
+//   apartment_admin:            restricted to their apartmentId; can filter by flatId
+//   super_admin:                unrestricted; can filter by apartmentId/flatId
 // ---------------------------------------------------------------------------
 router.get("/", async (req, res) => {
   const parsed = ComplaintFilterSchema.safeParse(req.query);
@@ -181,18 +192,28 @@ router.get("/", async (req, res) => {
   }
   const where: Prisma.ComplaintWhereInput = {};
   const role = req.auth!.role;
-  if (role === "flat_admin") {
+
+  // Committee members (flat_admin with committeePosition) get apartment-wide view
+  const isCommitteeMember =
+    role === "flat_admin" &&
+    req.auth!.committeePosition &&
+    req.auth!.committeeApartmentId;
+
+  if (role === "flat_admin" && !isCommitteeMember) {
     if (!req.auth!.flatId) {
       res.json([]);
       return;
     }
     where.flatId = req.auth!.flatId;
-  } else if (role === "apartment_admin") {
-    if (!req.auth!.apartmentId) {
+  } else if (role === "apartment_admin" || isCommitteeMember) {
+    const apartmentId = isCommitteeMember
+      ? req.auth!.committeeApartmentId
+      : req.auth!.apartmentId;
+    if (!apartmentId) {
       res.json([]);
       return;
     }
-    where.apartmentId = req.auth!.apartmentId;
+    where.apartmentId = apartmentId;
     if (parsed.data.flatId) where.flatId = parsed.data.flatId;
   } else {
     if (parsed.data.apartmentId) where.apartmentId = parsed.data.apartmentId;
@@ -239,11 +260,13 @@ router.get("/", async (req, res) => {
 //   apartment_admin: scoped to their apartment
 //   super_admin:     scoped via ?apartmentId= (optional)
 // ---------------------------------------------------------------------------
-router.get("/summary", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.get("/summary", requireApartmentAccess("apartment_admin"), async (req, res) => {
   const role = req.auth!.role;
   let apartmentId: string | undefined;
   if (role === "apartment_admin") {
     apartmentId = req.auth!.apartmentId ?? undefined;
+  } else if (role === "flat_admin" && req.auth!.committeePosition && req.auth!.committeeApartmentId) {
+    apartmentId = req.auth!.committeeApartmentId!;
   } else if (typeof req.query.apartmentId === "string") {
     apartmentId = req.query.apartmentId;
   }
@@ -297,11 +320,21 @@ router.get("/:id", async (req, res) => {
     return;
   }
   const role = req.auth!.role;
-  if (role === "flat_admin" && req.auth!.flatId !== complaint.flatId) {
+  const isCommitteeMember =
+    role === "flat_admin" &&
+    req.auth!.committeePosition &&
+    req.auth!.committeeApartmentId;
+
+  if (role === "flat_admin" && !isCommitteeMember && req.auth!.flatId !== complaint.flatId) {
     res.status(403).json({ message: "Forbidden" });
     return;
   }
   if (role === "apartment_admin" && req.auth!.apartmentId !== complaint.apartmentId) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+  // Committee members can view any complaint in their apartment
+  if (isCommitteeMember && req.auth!.committeeApartmentId !== complaint.apartmentId) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
   }
@@ -315,7 +348,7 @@ router.get("/:id", async (req, res) => {
 // ---------------------------------------------------------------------------
 router.patch(
   "/:id/status",
-  requireRole("apartment_admin", "super_admin"),
+  requireApartmentAccess("apartment_admin"),
   async (req, res) => {
     const parsed = StatusUpdateSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -327,7 +360,11 @@ router.patch(
       res.status(404).json({ message: "Complaint not found" });
       return;
     }
-    if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== complaint.apartmentId) {
+    // Determine the user's effective apartment ID (supports committee members)
+    const effectiveApartmentId = req.auth!.role === "flat_admin" && req.auth!.committeeApartmentId
+      ? req.auth!.committeeApartmentId
+      : req.auth!.apartmentId;
+    if (effectiveApartmentId && effectiveApartmentId !== complaint.apartmentId) {
       res.status(403).json({ message: "Forbidden — wrong apartment" });
       return;
     }
@@ -361,6 +398,14 @@ router.patch(
       return c;
     });
 
+    // Notify the flat owner via push that status changed.
+    notifyFlatOwnersPush(complaint.flatId, {
+      title: `Complaint status updated: ${parsed.data.status}`,
+      body: `${complaint.title} — changed from ${complaint.status} to ${parsed.data.status}`,
+      data: { type: "complaint_status", complaintId: complaint.id },
+      clickAction: `/complaints/${complaint.id}`,
+    }).catch((err: unknown) => console.error("[push] complaint status notification failed", err));
+
     if (COMPLAINT_EMAILS_ENABLED && apartment && flat?.ownerEmail) {
       try {
         await mailer.send(
@@ -390,7 +435,7 @@ router.patch(
 // ---------------------------------------------------------------------------
 // PATCH /complaints/:id — admin updates assignedTo / remarks / priority
 // ---------------------------------------------------------------------------
-router.patch("/:id", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.patch("/:id", requireApartmentAccess("apartment_admin"), async (req, res) => {
   const parsed = AdminPatchSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ message: "Invalid body", errors: parsed.error.flatten() });
@@ -401,7 +446,11 @@ router.patch("/:id", requireRole("apartment_admin", "super_admin"), async (req, 
     res.status(404).json({ message: "Complaint not found" });
     return;
   }
-  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== complaint.apartmentId) {
+  // Determine the user's effective apartment ID (supports committee members)
+  const effectiveApartmentId = req.auth!.role === "flat_admin" && req.auth!.committeeApartmentId
+    ? req.auth!.committeeApartmentId
+    : req.auth!.apartmentId;
+  if (effectiveApartmentId && effectiveApartmentId !== complaint.apartmentId) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
   }
@@ -434,11 +483,21 @@ router.post("/:id/messages", async (req, res) => {
     return;
   }
   const role = req.auth!.role;
-  if (role === "flat_admin" && req.auth!.flatId !== complaint.flatId) {
+  const isCommitteeMember =
+    role === "flat_admin" &&
+    req.auth!.committeePosition &&
+    req.auth!.committeeApartmentId;
+
+  if (role === "flat_admin" && !isCommitteeMember && req.auth!.flatId !== complaint.flatId) {
     res.status(403).json({ message: "Forbidden" });
     return;
   }
   if (role === "apartment_admin" && req.auth!.apartmentId !== complaint.apartmentId) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+  // Committee members can reply on any complaint in their apartment
+  if (isCommitteeMember && req.auth!.committeeApartmentId !== complaint.apartmentId) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
   }
@@ -469,6 +528,23 @@ router.post("/:id/messages", async (req, res) => {
     preview: parsed.data.body.length > 240 ? parsed.data.body.slice(0, 240) + "…" : parsed.data.body,
     createdAt: message.createdAt.toISOString(),
   });
+
+   // Notify the other side via push.
+   if (role === "flat_admin") {
+     notifyApartmentRolePush(complaint.apartmentId, ["apartment_admin"], {
+       title: `New message on complaint: ${complaint.title}`,
+       body: `${senderName}: ${parsed.data.body.length > 120 ? parsed.data.body.slice(0, 120) + "…" : parsed.data.body}`,
+       data: { type: "complaint_message", complaintId: complaint.id },
+       clickAction: `/complaints/${complaint.id}`,
+     }).catch((err: unknown) => console.error("[push] complaint message notification failed", err));
+   } else {
+     notifyFlatOwnersPush(complaint.flatId, {
+       title: `New message on complaint: ${complaint.title}`,
+       body: `${senderName}: ${parsed.data.body.length > 120 ? parsed.data.body.slice(0, 120) + "…" : parsed.data.body}`,
+       data: { type: "complaint_message", complaintId: complaint.id },
+       clickAction: `/complaints/${complaint.id}`,
+     }).catch((err: unknown) => console.error("[push] complaint message notification failed", err));
+   }
 
    // Notify the other side via email (disabled unless COMPLAINT_EMAILS_ENABLED=true).
    if (COMPLAINT_EMAILS_ENABLED) {

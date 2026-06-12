@@ -9,6 +9,8 @@ export interface JwtPayload {
   apartmentId: string | null;
   flatId: string | null;
   tokenVersion: number;
+  committeePosition?: string | null;
+  committeeApartmentId?: string | null;
 }
 
 export function signToken(payload: JwtPayload): string {

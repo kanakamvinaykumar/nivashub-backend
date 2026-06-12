@@ -61,7 +61,7 @@ const COMMON_RULES = [
 
 const baseAssociations: Record<string, Partial<Association>> = {
   "apt-001": {
-    registeredName: "Green Valley Heights Owners Welfare Association",
+    registeredName: "Green Valley Heights",
     description:
       "Green Valley Heights is a 248-flat residential community on Sarjapur Road, Bengaluru, established in 2014. The Owners Welfare Association is a registered society under the Karnataka Societies Registration Act, run by elected resident volunteers. Our mission is to keep Green Valley a calm, well-maintained, child-friendly community where families across cultures and languages feel at home.",
     managementType: "Resident-managed (Owners Welfare Association)",
@@ -120,7 +120,7 @@ export async function getAssociation(apartmentId: string): Promise<Association |
 
   return {
     apartmentId,
-    registeredName: base.registeredName ?? `${apt.name} Owners Welfare Association`,
+    registeredName: base.registeredName ?? `${apt.name}`,
     registrationNumber: `REG/${apt.city.slice(0, 3).toUpperCase()}/${2010 + (apt.name.length % 14)}/${(apt.id.length * 89) % 9999}`,
     foundedYear: 2010 + (apt.name.length % 14),
     description:

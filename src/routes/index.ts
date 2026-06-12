@@ -4,6 +4,7 @@ import dataRouter from "./data.js";
 import superAdminRouter from "./super-admin.js";
 import complaintsRouter from "./complaints.js";
 import paymentsRouter from "./payments.js";
+import notificationsRouter from "./notifications.js";
 
 const router = Router();
 
@@ -16,5 +17,6 @@ router.use("/super-admin", superAdminRouter);
 router.use("/complaints", complaintsRouter);
 router.use("/payments", paymentsRouter);
 router.use("/", dataRouter);
+router.use("/notifications", notificationsRouter);
 
 export default router;

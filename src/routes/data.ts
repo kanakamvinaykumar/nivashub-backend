@@ -16,6 +16,7 @@ import {
 } from "../lib/mailer.js";
 import { recordActivity, getApartmentActivity } from "../lib/activity.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireCommitteeOrRole, requireApartmentAccess } from "../lib/committee.js";
 import { notifyVisitorPassCreated, notifyVisitorPassUpdated, notifyAnnouncementCreated } from "../socket.js";
 import { processAttachment } from "../lib/media.js";
 
@@ -120,8 +121,13 @@ router.get("/apartments/:id/summary", async (req, res) => {
   });
 });
 
-router.get("/apartments/:id/activity", requireRole("apartment_admin", "super_admin"), async (req, res) => {
-  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+router.get("/apartments/:id/activity", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
+  // Committee members are allowed via requireCommitteeOrRole; for apartment_admin verify scope
+  const effectiveApartmentId =
+    req.auth!.role === "flat_admin" && req.auth!.committeeApartmentId
+      ? req.auth!.committeeApartmentId
+      : req.auth!.apartmentId;
+  if (effectiveApartmentId && effectiveApartmentId !== req.params.id) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
   }
@@ -173,8 +179,12 @@ const SecurityMemberSchema = z.object({
   notes: z.string().max(500).optional(),
 });
 
-router.get("/apartments/:id/security-members", requireRole("apartment_admin", "super_admin"), async (req, res) => {
-  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+router.get("/apartments/:id/security-members", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
+  const effectiveApartmentId =
+    req.auth!.role === "flat_admin" && req.auth!.committeeApartmentId
+      ? req.auth!.committeeApartmentId
+      : req.auth!.apartmentId;
+  if (effectiveApartmentId && effectiveApartmentId !== req.params.id) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
   }
@@ -196,13 +206,17 @@ router.get("/apartments/:id/security-members", requireRole("apartment_admin", "s
   res.json(users);
 });
 
-router.post("/apartments/:id/security-members", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.post("/apartments/:id/security-members", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
   const parsed = SecurityMemberSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
     return;
   }
-  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+  const effectiveApartmentId =
+    req.auth!.role === "flat_admin" && req.auth!.committeeApartmentId
+      ? req.auth!.committeeApartmentId
+      : req.auth!.apartmentId;
+  if (effectiveApartmentId && effectiveApartmentId !== req.params.id) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
   }
@@ -261,8 +275,12 @@ router.post("/apartments/:id/security-members", requireRole("apartment_admin", "
   res.status(201).json(user);
 });
 
-router.delete("/apartments/:id/security-members/:userId", requireRole("apartment_admin", "super_admin"), async (req, res) => {
-  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+router.delete("/apartments/:id/security-members/:userId", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
+  const effectiveApartmentId =
+    req.auth!.role === "flat_admin" && req.auth!.committeeApartmentId
+      ? req.auth!.committeeApartmentId
+      : req.auth!.apartmentId;
+  if (effectiveApartmentId && effectiveApartmentId !== req.params.id) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
   }
@@ -287,6 +305,204 @@ router.delete("/apartments/:id/security-members/:userId", requireRole("apartment
   } catch (err) {
     console.error("[activity] failed to record security member deletion", err);
   }
+  res.json({ ok: true });
+});
+
+// ---------- Committee Management ----------
+
+// GET /apartments/:id/committee — list current committee members
+router.get("/apartments/:id/committee", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
+  const effectiveApartmentId =
+    req.auth!.role === "flat_admin" && req.auth!.committeeApartmentId
+      ? req.auth!.committeeApartmentId
+      : req.auth!.apartmentId;
+  if (effectiveApartmentId && effectiveApartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+
+  const committee = await prisma.committeeMember.findMany({
+    where: { apartmentId: req.params.id },
+    include: {
+      user: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          flatNumber: true,
+          phone: true,
+        },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+
+  res.json(
+    committee.map((c) => ({
+      id: c.id,
+      userId: c.userId,
+      position: c.position,
+      name: c.user?.name ?? c.name,
+      flatNumber: c.user?.flatNumber ?? c.flatNumber,
+      email: c.user?.email ?? c.email,
+      phone: c.user?.phone ?? c.phone,
+    })),
+  );
+});
+
+// GET /apartments/:id/eligible-residents — list flat_admin users who can be assigned committee roles
+router.get("/apartments/:id/eligible-residents", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
+  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+
+  const residents = await prisma.user.findMany({
+    where: {
+      apartmentId: req.params.id,
+      role: "flat_admin",
+      flatId: { not: null },
+    },
+    orderBy: { name: "asc" },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      flatNumber: true,
+      phone: true,
+      committeeMember: {
+        select: { position: true },
+      },
+    },
+  });
+
+  res.json(
+    residents.map((r) => ({
+      ...r,
+      currentPosition: r.committeeMember?.position ?? null,
+    })),
+  );
+});
+
+// POST /apartments/:id/committee — assign committee role to a resident
+const CommitteeRoleSchema = z.object({
+  userId: z.string().min(1),
+  position: z.enum(["president", "secretary", "treasurer", "maintenance", "cultural", "security"]),
+});
+
+router.post("/apartments/:id/committee", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
+  const parsed = CommitteeRoleSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+
+  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: parsed.data.userId } });
+  if (!user || user.apartmentId !== req.params.id || user.role !== "flat_admin") {
+    res.status(404).json({ message: "Eligible resident not found" });
+    return;
+  }
+
+  // Update user with committee role and invalidate existing tokens
+  const updated = await prisma.user.update({
+    where: { id: parsed.data.userId },
+    data: {
+      committeePosition: parsed.data.position,
+      committeeApartmentId: req.params.id,
+      tokenVersion: { increment: 1 },
+    },
+  });
+
+  // Create/update CommitteeMember record
+  await prisma.committeeMember.upsert({
+    where: { userId: parsed.data.userId },
+    create: {
+      userId: parsed.data.userId,
+      apartmentId: req.params.id,
+      position: parsed.data.position,
+      name: user.name,
+      flatNumber: user.flatNumber,
+      email: user.email,
+      phone: user.phone,
+    },
+    update: {
+      position: parsed.data.position,
+      name: user.name,
+      flatNumber: user.flatNumber,
+      email: user.email,
+      phone: user.phone,
+    },
+  });
+
+  try {
+    await recordActivity({
+      apartmentId: req.params.id,
+      userId: req.auth?.userId ?? null,
+      userRole: req.auth?.role ?? "apartment_admin",
+      action: "assigned",
+      entity: "committee_member",
+      entityId: parsed.data.userId,
+      details: `position=${parsed.data.position}, name=${user.name}`,
+    });
+  } catch (err) {
+    console.error("[activity] failed to record committee assignment", err);
+  }
+
+  res.status(201).json({
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    flatNumber: user.flatNumber,
+    position: parsed.data.position,
+  });
+});
+
+// DELETE /apartments/:id/committee/:userId — remove committee role from resident
+router.delete("/apartments/:id/committee/:userId", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
+  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
+    res.status(403).json({ message: "Forbidden — wrong apartment" });
+    return;
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
+  if (!user || user.apartmentId !== req.params.id || user.role !== "flat_admin") {
+    res.status(404).json({ message: "Committee member not found" });
+    return;
+  }
+
+  // Remove committee role from user
+  await prisma.user.update({
+    where: { id: req.params.userId },
+    data: {
+      committeePosition: null,
+      committeeApartmentId: null,
+    },
+  });
+
+  // Delete CommitteeMember record
+  await prisma.committeeMember.delete({
+    where: { userId: req.params.userId },
+  });
+
+  try {
+    await recordActivity({
+      apartmentId: req.params.id,
+      userId: req.auth?.userId ?? null,
+      userRole: req.auth?.role ?? "apartment_admin",
+      action: "removed",
+      entity: "committee_member",
+      entityId: req.params.userId,
+      details: `name=${user.name}`,
+    });
+  } catch (err) {
+    console.error("[activity] failed to record committee removal", err);
+  }
+
   res.json({ ok: true });
 });
 
@@ -613,19 +829,6 @@ router.post("/apartments", requireRole("super_admin"), async (req, res) => {
       if (rules?.length) {
         await tx.societyRule.createMany({
           data: rules.map((text) => ({ apartmentId: apt.id, text })),
-        });
-      }
-
-      if (committee?.length) {
-        await tx.committeeMember.createMany({
-          data: committee.map((m) => ({
-            apartmentId: apt.id,
-            position: m.position,
-            name: m.name,
-            flatNumber: m.flatNumber ?? null,
-            phone: m.phone ?? null,
-            email: m.email ? m.email : null,
-          })),
         });
       }
 
@@ -981,7 +1184,7 @@ const BlockSchema = z.object({
   name: z.string().min(1).max(40).transform((v) => v.trim()),
 });
 
-router.post("/apartments/:id/blocks", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.post("/apartments/:id/blocks", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
   if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
@@ -1019,7 +1222,7 @@ router.post("/apartments/:id/blocks", requireRole("apartment_admin", "super_admi
   }
 });
 
-router.patch("/apartments/:id/blocks/:blockId", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.patch("/apartments/:id/blocks/:blockId", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
   if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
@@ -1069,7 +1272,7 @@ router.patch("/apartments/:id/blocks/:blockId", requireRole("apartment_admin", "
   }
 });
 
-router.delete("/apartments/:id/blocks/:blockId", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.delete("/apartments/:id/blocks/:blockId", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
   if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== req.params.id) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
     return;
@@ -1357,7 +1560,7 @@ class HttpError extends Error {
   }
 }
 
-router.post("/apartments/:id/flats", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.post("/apartments/:id/flats", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
   const apartmentId = req.params.id;
   if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== apartmentId) {
     res.status(403).json({ message: "Forbidden — wrong apartment" });
@@ -1514,7 +1717,7 @@ interface BulkRowError {
 
 router.post(
   "/apartments/:id/flats/bulk-csv",
-  requireRole("apartment_admin", "super_admin"),
+  requireCommitteeOrRole("id", "apartment_admin"),
   async (req, res) => {
     const apartmentId = req.params.id;
     if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== apartmentId) {
@@ -1936,7 +2139,7 @@ router.patch("/flats/:id", async (req, res) => {
 // password (or just re-send the link) for the flat owner. Returns
 // `{ channels: { email, whatsapp } }` indicating which deliveries were
 // attempted.
-router.post("/flats/:id/resend-invite", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.post("/flats/:id/resend-invite", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
   const flat = await prisma.flat.findUnique({ where: { id: req.params.id } });
   if (!flat) {
     res.status(404).json({ message: "Flat not found" });
@@ -2017,7 +2220,7 @@ router.post("/flats/:id/resend-invite", requireRole("apartment_admin", "super_ad
   }
 });
 
-router.delete("/flats/:id", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+router.delete("/flats/:id", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
   const flat = await prisma.flat.findUnique({ where: { id: req.params.id } });
   if (!flat) {
     res.status(404).json({ message: "Flat not found" });
