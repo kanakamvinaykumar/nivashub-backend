@@ -13,10 +13,16 @@ export async function notifyUserPush(
     select: { token: true },
   });
 
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) {
+    console.log(`[push] notifyUserPush(userId=${userId}): no FCM tokens found, payload="${payload.title}"`);
+    return 0;
+  }
 
   const tokenStrings = tokens.map((t) => t.token);
-  return sendMulticastPushNotification(tokenStrings, payload);
+  console.log(`[push] notifyUserPush(userId=${userId}): sending to ${tokens.length} tokens`);
+  const sent = await sendMulticastPushNotification(tokenStrings, payload);
+  console.log(`[push] notifyUserPush(userId=${userId}): ${sent}/${tokens.length} delivered`);
+  return sent;
 }
 
 /**
@@ -32,19 +38,28 @@ export async function notifyFlatOwnersPush(
   });
 
   const userIds = owners.map((o) => o.userId);
-  if (userIds.length === 0) return 0;
+  if (userIds.length === 0) {
+    console.log(`[push] notifyFlatOwnersPush(flatId=${flatId}): no flat owners found`);
+    return 0;
+  }
 
   const tokens = await prisma.fcmToken.findMany({
     where: { userId: { in: userIds } },
     select: { token: true },
   });
 
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) {
+    console.log(`[push] notifyFlatOwnersPush(flatId=${flatId}): ${userIds.length} owners but 0 FCM tokens found`);
+    return 0;
+  }
 
-  return sendMulticastPushNotification(
+  console.log(`[push] notifyFlatOwnersPush(flatId=${flatId}): sending to ${tokens.length} tokens`);
+  const sent = await sendMulticastPushNotification(
     tokens.map((t) => t.token),
     payload,
   );
+  console.log(`[push] notifyFlatOwnersPush(flatId=${flatId}): ${sent}/${tokens.length} delivered`);
+  return sent;
 }
 
 /**
@@ -67,10 +82,16 @@ export async function notifyApartmentRolePush(
     select: { token: true },
   });
 
-  if (tokens.length === 0) return 0;
+  if (tokens.length === 0) {
+    console.log(`[push] notifyApartmentRolePush(apartmentId=${apartmentId}, role=${roles}): no FCM tokens found`);
+    return 0;
+  }
 
-  return sendMulticastPushNotification(
+  console.log(`[push] notifyApartmentRolePush(apartmentId=${apartmentId}, role=${roles}): sending to ${tokens.length} tokens`);
+  const sent = await sendMulticastPushNotification(
     tokens.map((t) => t.token),
     payload,
   );
+  console.log(`[push] notifyApartmentRolePush(apartmentId=${apartmentId}, role=${roles}): ${sent}/${tokens.length} delivered`);
+  return sent;
 }

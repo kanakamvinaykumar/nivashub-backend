@@ -11,7 +11,8 @@ import {
   buildComplaintStatusChangedMail,
   mailer,
 } from "../lib/mailer.js";
-import { notifyComplaintMessage } from "../socket.js";
+import { notifyComplaintMessage, notifyComplaintCreated } from "../socket.js";
+import { createNotification, notifyFlatOwners, notifyApartmentAdmins } from "../lib/notifications.js";
 import { processAttachment } from "../lib/media.js";
 import { notifyFlatOwnersPush, notifyApartmentRolePush } from "../lib/notify-push.js";
 
@@ -147,6 +148,29 @@ router.post("/", async (req, res) => {
     data: { type: "complaint_created", complaintId: complaint.id },
     clickAction: `/complaints/${complaint.id}`,
   }).catch((err: unknown) => console.error("[push] complaint-created notification failed", err));
+
+  // Notify apartment admins via WebSocket for real-time UI update.
+  notifyComplaintCreated({
+    complaintId: complaint.id,
+    apartmentId: complaint.apartmentId,
+    flatId: complaint.flatId,
+    flatNumber: complaint.flatNumber,
+    blockName: complaint.blockName,
+    title: complaint.title,
+    category: complaint.category,
+    priority: complaint.priority,
+    raisedByName: complaint.raisedByName,
+    createdAt: complaint.createdAt.toISOString(),
+  });
+
+  // Persist in-app notification for all apartment admins
+  notifyApartmentAdmins(
+    flat.apartmentId,
+    "complaint_created",
+    `New complaint from ${complaint.flatNumber}`,
+    complaint.title,
+    `/complaints/${complaint.id}`,
+  ).catch((err: unknown) => console.error("[notification] complaint-created notification failed", err));
 
   // Notify apartment admins via email.
   if (COMPLAINT_EMAILS_ENABLED) {
@@ -597,6 +621,28 @@ router.post("/:id/messages", async (req, res) => {
      } catch (err) {
        console.error("[mail] complaint reply notification failed", err);
      }
+   }
+
+   // Persist in-app notifications for the other party (admin↔flat)
+   if (role === "flat_admin") {
+     // Flat user sent a message → notify apartment admins
+     notifyApartmentAdmins(
+       complaint.apartmentId,
+       "complaint_message",
+       `New message: ${complaint.title}`,
+       `${senderName}: ${parsed.data.body.length > 120 ? parsed.data.body.slice(0, 120) + "…" : parsed.data.body}`,
+       `/complaints/${complaint.id}`,
+     ).catch((err: unknown) => console.error("[notification] complaint message admin notification failed", err));
+   } else {
+     // Admin sent a message → notify flat owner(s)
+     notifyFlatOwners(
+       complaint.flatId,
+       complaint.apartmentId,
+       "complaint_message",
+       `New message on: ${complaint.title}`,
+       `${senderName}: ${parsed.data.body.length > 120 ? parsed.data.body.slice(0, 120) + "…" : parsed.data.body}`,
+       `/complaints/${complaint.id}`,
+     ).catch((err: unknown) => console.error("[notification] complaint message flat notification failed", err));
    }
 
   res.status(201).json(message);

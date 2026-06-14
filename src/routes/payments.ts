@@ -21,7 +21,9 @@ import {
   buildPaymentSubmittedOwnerMail,
   mailer,
 } from "../lib/mailer.js";
+import { createNotification, notifyApartmentAdmins, notifyFlatOwners } from "../lib/notifications.js";
 import { recordActivity } from "../lib/activity.js";
+import { notifyFlatOwnersPush } from "../lib/notify-push.js";
 import {
   notifyPaymentSubmitted,
   notifyPaymentApproved,
@@ -356,6 +358,27 @@ router.post("/", async (req, res) => {
     return created;
   });
 
+  // Persist in-app notification for the payer
+  if (payer) {
+    createNotification({
+      userId: payer.id,
+      apartmentId: flat.apartmentId,
+      type: "payment_submitted",
+      title: `Payment initiated — ₹${(amount / 100).toLocaleString("en-IN")}`,
+      body: `Reference: ${reference} — upload a screenshot to complete verification`,
+      link: "/flat-admin/payments",
+    }).catch((err: unknown) => console.error("[notification] payment submitted notification failed", err));
+  }
+
+  // Notify all apartment admins
+  notifyApartmentAdmins(
+    flat.apartmentId,
+    "payment_submitted",
+    `Payment initiated by ${paidByName} (${flat.number})`,
+    `₹${(amount / 100).toLocaleString("en-IN")} — Reference: ${reference}`,
+    "/apartment-admin/payments",
+  ).catch((err: unknown) => console.error("[notification] payment submitted admin notification failed", err));
+
   res.status(201).json({
     payment: {
       id: payment.id,
@@ -390,7 +413,7 @@ const ManualPaymentSchema = z.object({
   flatId: z.string().min(1),
   dueIds: z.array(z.string().min(1)).min(1).max(60),
   method: z
-    .enum(["cash", "upi", "bank_transfer", "cheque", "other"]) // optional
+    .enum(["cash", "upi", "bank_transfer", "cheque", "other"])
     .optional()
     .nullable(),
   transactionRef: z.string().max(200).optional().nullable(),
@@ -534,6 +557,14 @@ router.post(
     } catch (err) {
       console.error("[activity] failed to record manual payment", err);
     }
+
+    // Persist in-app notification for flat owner
+    notifyFlatOwnersPush(flat.id, {
+      title: `Payment approved — ₹${(amount / 100).toLocaleString("en-IN")}`,
+      body: `Reference: ${reference} — receipt: ${receiptNumber}`,
+      data: { type: "payment_approved" },
+      clickAction: "/flat-admin/payments",
+    }).catch(() => {});
 
     res.status(201).json(payment);
   },
@@ -880,7 +911,6 @@ router.post(
           verifiedAt: issuedAt,
           verifiedByUserId: req.auth!.userId,
           verifiedByName: verifierName,
-          // Persist admin remarks and include manual payment metadata for audit.
           adminRemarks:
             (parsed.data.remarks?.trim() ?? "") +
             (method ? `\n\n[Marked paid manually]\nMethod: ${method}` : "") +
@@ -904,7 +934,6 @@ router.post(
           body,
         },
       });
-      // Refresh the flat's cached `pendingDuesInr` so dashboards stay correct.
       const remaining = await tx.maintenanceDue.aggregate({
         where: { flatId: payment.flatId, status: { in: ["pending", "pending_verification"] } },
         _sum: { amountInr: true },
@@ -950,7 +979,6 @@ router.post(
     }
 
     try {
-      // Record activity for manual/administrative approval.
       const detailsParts: string[] = [];
       if (method) detailsParts.push(`method=${method}`);
       if (transactionRef) detailsParts.push(`transactionRef=${transactionRef}`);
@@ -1022,7 +1050,6 @@ router.post(
           adminRemarks: parsed.data.remarks.trim(),
         },
       });
-      // Free the dues so the owner can retry.
       await tx.maintenanceDue.updateMany({
         where: { paymentId: payment.id },
         data: { status: "pending", paymentId: null },
@@ -1110,4 +1137,3 @@ router.get("/:id/receipt", async (req, res) => {
 });
 
 export default router;
-

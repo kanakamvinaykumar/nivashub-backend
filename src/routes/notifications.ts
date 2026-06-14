@@ -96,4 +96,132 @@ router.get("/tokens", requireAuth, async (req, res) => {
   res.json(tokens);
 });
 
+/**
+ * POST /notifications/test-welcome — Send a test welcome push to the current user.
+ * Used to verify FCM push notifications are working end-to-end.
+ */
+router.post("/test-welcome", requireAuth, async (req, res) => {
+  const { sendPushNotification } = await import("../lib/fcm.js");
+
+  const tokens = await prisma.fcmToken.findMany({
+    where: { userId: req.auth!.userId },
+    select: { token: true },
+  });
+
+  if (tokens.length === 0) {
+    res.status(400).json({ message: "No FCM tokens registered for this user." });
+    return;
+  }
+
+  const results = await Promise.allSettled(
+    tokens.map((t) =>
+      sendPushNotification(t.token, {
+        title: "Welcome to NivasHub 🎉",
+        body: "Your push notifications are working! You'll now receive real-time updates.",
+        icon: "/nivashub-logo.svg",
+        clickAction: "/",
+        data: { tag: "welcome-test" },
+      }),
+    ),
+  );
+
+  const sent = results.filter((r) => r.status === "fulfilled" && r.value).length;
+  const failed = results.filter((r) => r.status === "rejected" || (r.status === "fulfilled" && !r.value)).length;
+
+  console.log(`[test-welcome] userId=${req.auth!.userId}: ${sent} sent, ${failed} failed`);
+
+  res.json({ ok: true, sent, failed, total: tokens.length });
+});
+
+// ---------------------------------------------------------------------------
+// In-app notification endpoints
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /notifications/list — List all notifications for the current user.
+ * Supports ?limit=50&offset=0&unreadOnly=true
+ */
+router.get("/list", requireAuth, async (req, res) => {
+  const userId = req.auth!.userId;
+  const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 50, 1), 100);
+  const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
+  const unreadOnly = req.query.unreadOnly === "true";
+
+  const where: any = { userId };
+  if (unreadOnly) {
+    where.isRead = false;
+  }
+
+  const [notifications, totalCount, unreadCount] = await Promise.all([
+    prisma.notification.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      skip: offset,
+    }),
+    prisma.notification.count({ where }),
+    prisma.notification.count({ where: { userId, isRead: false } }),
+  ]);
+
+  res.json({
+    notifications,
+    totalCount,
+    unreadCount,
+  });
+});
+
+/**
+ * PATCH /notifications/:id/read — Mark a single notification as read.
+ */
+router.patch("/:id/read", requireAuth, async (req, res) => {
+  const userId = req.auth!.userId;
+
+  const notification = await prisma.notification.findUnique({
+    where: { id: req.params.id },
+    select: { userId: true },
+  });
+
+  if (!notification) {
+    res.status(404).json({ message: "Notification not found" });
+    return;
+  }
+
+  if (notification.userId !== userId) {
+    res.status(403).json({ message: "Forbidden" });
+    return;
+  }
+
+  await prisma.notification.update({
+    where: { id: req.params.id },
+    data: { isRead: true },
+  });
+
+  res.json({ ok: true });
+});
+
+/**
+ * POST /notifications/read-all — Mark all notifications as read for the current user.
+ */
+router.post("/read-all", requireAuth, async (req, res) => {
+  const userId = req.auth!.userId;
+
+  const result = await prisma.notification.updateMany({
+    where: { userId, isRead: false },
+    data: { isRead: true },
+  });
+
+  res.json({ ok: true, updated: result.count });
+});
+
+/**
+ * GET /notifications/unread-count — Get the unread notification count for the current user.
+ */
+router.get("/unread-count", requireAuth, async (req, res) => {
+  const count = await prisma.notification.count({
+    where: { userId: req.auth!.userId, isRead: false },
+  });
+
+  res.json({ count });
+});
+
 export default router;

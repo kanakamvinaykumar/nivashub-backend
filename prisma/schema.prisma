@@ -130,6 +130,19 @@ enum PaymentStatus {
   rejected
 }
 
+/// The type/category of an in-app notification
+enum NotificationType {
+  visitor_pass_created
+  visitor_pass_updated
+  payment_submitted
+  payment_approved
+  payment_rejected
+  announcement_created
+  complaint_created
+  complaint_message
+  enquiry_received
+}
+
 model User {
   id                      String               @id @default(cuid())
   email                   String               @unique
@@ -157,6 +170,7 @@ model User {
   activityLogs ActivityLog[]
   committeeMember CommitteeMember?
   fcmTokens FcmToken[]
+  notifications Notification[]
 }
 
 model Apartment {
@@ -199,6 +213,26 @@ model Apartment {
   maintenanceDues MaintenanceDue[]
   payments        MaintenancePayment[]
   activityLogs    ActivityLog[]
+  notifications   Notification[]
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  userId      String
+  apartmentId String?
+  type        NotificationType
+  title       String
+  body        String
+  link        String?          // Deep link path (e.g. "/complaints/abc123")
+  isRead      Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apartment Apartment? @relation(fields: [apartmentId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, isRead])
+  @@index([apartmentId])
 }
 
 model Block {
@@ -571,4 +605,21 @@ model PaymentReceipt {
   body          String
 
   payment MaintenancePayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Contact / Enquiry form
+// ---------------------------------------------------------------------------
+
+model Enquiry {
+  id              String   @id @default(cuid())
+  name            String
+  email           String
+  phone           String
+  city            String
+  associationName String?
+  message         String?
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
 }

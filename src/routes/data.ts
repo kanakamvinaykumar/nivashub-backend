@@ -18,6 +18,7 @@ import { recordActivity, getApartmentActivity } from "../lib/activity.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { requireCommitteeOrRole, requireApartmentAccess } from "../lib/committee.js";
 import { notifyVisitorPassCreated, notifyVisitorPassUpdated, notifyAnnouncementCreated } from "../socket.js";
+import { notifyFlatOwners, notifyApartmentAdmins, notifyAllFlatAdmins } from "../lib/notifications.js";
 import { processAttachment } from "../lib/media.js";
 
 const router = Router();
@@ -601,6 +602,16 @@ router.post("/announcements", async (req, res) => {
     seenCount: created.seenCount,
     createdAt: created.createdAt.toISOString(),
   });
+
+  // Persist in-app notifications for all flat admins
+  notifyAllFlatAdmins(
+    created.apartmentId,
+    "announcement_created",
+    created.title,
+    created.body.length > 200 ? created.body.slice(0, 200) + "…" : created.body,
+    "/flat-admin/announcements",
+  ).catch((err: unknown) => console.error("[notification] announcement notification failed", err));
+
   res.status(201).json(created);
 });
 
@@ -1375,7 +1386,13 @@ async function provisionFlatOwner(args: {
   const existing = email ? await prisma.user.findUnique({ where: { email } }) : null;
 
   if (existing) {
-    if (existing.role !== "flat_admin" || (existing.apartmentId && existing.apartmentId !== args.apartmentId)) {
+    // If the user exists in a different apartment with a non-flat_admin role, reject.
+    if (existing.role !== "flat_admin" && existing.role !== "apartment_admin" && existing.role !== "super_admin") {
+      throw new HttpError(409, "Email is already registered to a different account. Use a different email.");
+    }
+    // If it's an apartment_admin or super_admin, just link — they already have apartment-level access.
+    // If it's a flat_admin from a completely different apartment, still reject unless it's the same apartment.
+    if (existing.role === "flat_admin" && existing.apartmentId && existing.apartmentId !== args.apartmentId) {
       throw new HttpError(409, "Email is already registered to a different account. Use a different email.");
     }
     // Already a flat_admin (possibly in this apartment). Link via FlatOwner.
@@ -2220,14 +2237,24 @@ router.post("/flats/:id/resend-invite", requireCommitteeOrRole("id", "apartment_
   }
 });
 
-router.delete("/flats/:id", requireCommitteeOrRole("id", "apartment_admin"), async (req, res) => {
+router.delete("/flats/:id", async (req, res) => {
   const flat = await prisma.flat.findUnique({ where: { id: req.params.id } });
   if (!flat) {
     res.status(404).json({ message: "Flat not found" });
     return;
   }
-  if (req.auth!.role === "apartment_admin" && req.auth!.apartmentId !== flat.apartmentId) {
-    res.status(403).json({ message: "Forbidden — wrong apartment" });
+
+  // Check authorization: super_admin, apartment_admin (own apartment), or committee member (same apartment)
+  const role = req.auth!.role;
+  const isCommitteeMember =
+    role === "flat_admin" &&
+    req.auth!.committeePosition &&
+    req.auth!.committeeApartmentId === flat.apartmentId;
+  const isApartmentAdmin = role === "apartment_admin" && req.auth!.apartmentId === flat.apartmentId;
+  const isSuperAdmin = role === "super_admin";
+
+  if (!isSuperAdmin && !isApartmentAdmin && !isCommitteeMember) {
+    res.status(403).json({ message: "Forbidden — insufficient role" });
     return;
   }
   try {
@@ -2352,6 +2379,17 @@ router.post("/visitor-passes", async (req, res) => {
     createdAt: created.createdAt.toISOString(),
     expiresAt: created.expiresAt.toISOString(),
   });
+
+  // Persist in-app notification for flat owners
+  notifyFlatOwners(
+    created.flatId,
+    created.apartmentId,
+    "visitor_pass_created",
+    `Visitor pass created for ${created.guestName}`,
+    `${created.guestName} (${created.type}) — valid until ${created.expiresAt.toLocaleDateString()}`,
+    "/flat-admin/visitors",
+  ).catch((err: unknown) => console.error("[notification] visitor pass notification failed", err));
+
   res.status(201).json(created);
 });
 

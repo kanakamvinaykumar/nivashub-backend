@@ -87,6 +87,22 @@ export interface ComplaintMessageNotificationData {
 export type ComplaintMessageNotification =
   | { event: "complaint.message"; data: ComplaintMessageNotificationData };
 
+export interface ComplaintCreatedNotificationData {
+  complaintId: string;
+  apartmentId: string;
+  flatId: string;
+  flatNumber: string;
+  blockName: string;
+  title: string;
+  category: string;
+  priority: string;
+  raisedByName: string;
+  createdAt: string;
+}
+
+export type ComplaintCreatedNotification =
+  | { event: "complaint.created"; data: ComplaintCreatedNotificationData };
+
 export type PaymentNotificationEvent =
   | { event: "payment.submitted"; data: PaymentNotificationData }
   | { event: "payment.approved"; data: PaymentNotificationData }
@@ -96,7 +112,8 @@ export type NotificationEvent =
   | VisitorPassNotification
   | PaymentNotification
   | AnnouncementNotification
-  | ComplaintMessageNotification;
+  | ComplaintMessageNotification
+  | ComplaintCreatedNotification;
 
 export function registerWebSocketServer(server: HttpServer) {
   const wss = new WebSocketServer({ server, path: "/ws" });
@@ -192,4 +209,11 @@ export function notifyComplaintMessage(message: ComplaintMessageNotificationData
     }
     return auth.role === "flat_admin" && auth.flatId === message.flatId;
   }, { event: "complaint.message", data: message });
+}
+
+export function notifyComplaintCreated(complaint: ComplaintCreatedNotificationData) {
+  broadcast(
+    (auth) => auth.role === "apartment_admin" && auth.apartmentId === complaint.apartmentId,
+    { event: "complaint.created", data: complaint },
+  );
 }

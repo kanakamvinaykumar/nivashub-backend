@@ -21,11 +21,12 @@ function loadCredentials(): object | undefined {
     try {
       const cred = JSON.parse(json);
       if (cred.type === "service_account") {
+        console.log("[fcm] Using credentials from FIREBASE_SERVICE_ACCOUNT_JSON");
         return cred;
       }
-      console.warn("FIREBASE_SERVICE_ACCOUNT_JSON is set but does not have type=service_account");
+      console.warn("[fcm] FIREBASE_SERVICE_ACCOUNT_JSON is set but does not have type=service_account");
     } catch {
-      console.warn("FIREBASE_SERVICE_ACCOUNT_JSON is set but is not valid JSON");
+      console.warn("[fcm] FIREBASE_SERVICE_ACCOUNT_JSON is set but is not valid JSON");
     }
   }
 
@@ -34,6 +35,7 @@ function loadCredentials(): object | undefined {
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
   const projectId = process.env.FIREBASE_PROJECT_ID || "nivashub";
   if (privateKey && clientEmail) {
+    console.log("[fcm] Using credentials from FIREBASE_PRIVATE_KEY + FIREBASE_CLIENT_EMAIL");
     return {
       type: "service_account",
       project_id: projectId,
@@ -56,10 +58,11 @@ function loadCredentials(): object | undefined {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       return require(resolvedPath);
     } catch (error) {
-      console.error("Failed to load Firebase service account file:", error);
+      console.error("[fcm] Failed to load Firebase service account file:", error);
     }
   }
 
+  console.warn("[fcm] No Firebase credentials found via env vars: FIREBASE_SERVICE_ACCOUNT_JSON, FIREBASE_PRIVATE_KEY+CLIENT_EMAIL, or FIREBASE_SERVICE_ACCOUNT_PATH. Push notifications will be DISABLED.");
   return undefined;
 }
 
@@ -132,6 +135,7 @@ export async function sendPushNotification(
           title: payload.title,
           body: payload.body,
           icon: payload.icon || "/nivashub-logo.svg",
+          sound: "/notification.wav",
           requireInteraction: true,
         },
         fcmOptions: {

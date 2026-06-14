@@ -5,6 +5,7 @@ import superAdminRouter from "./super-admin.js";
 import complaintsRouter from "./complaints.js";
 import paymentsRouter from "./payments.js";
 import notificationsRouter from "./notifications.js";
+import enquiriesRouter from "./enquiries.js";
 
 const router = Router();
 
@@ -16,6 +17,7 @@ router.use("/auth", authRouter);
 router.use("/super-admin", superAdminRouter);
 router.use("/complaints", complaintsRouter);
 router.use("/payments", paymentsRouter);
+router.use("/enquiries", enquiriesRouter);
 router.use("/", dataRouter);
 router.use("/notifications", notificationsRouter);
 
