@@ -1,9 +1,12 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
+import { randomUUID } from "crypto";
 import { prisma } from "../lib/prisma.js";
 import { signToken } from "../lib/jwt.js";
 import { requireAuth } from "../middleware/auth.js";
+import { buildSelfRegistrationMail } from "../lib/register-mail.js";
+import { mailer } from "../lib/mailer.js";
 
 const router = Router();
 
@@ -26,6 +29,15 @@ const UpdateAccountSchema = z
       path: ["currentPassword"],
     },
   );
+
+const RegisterSchema = z.object({
+  fullName: z.string().min(1).max(120),
+  email: z.string().email(),
+  phone: z.string().min(6).max(40),
+  apartmentCode: z.string().min(2).max(20).transform((v) => v.toUpperCase()).optional(),
+  apartmentName: z.string().min(3).max(100).optional(),
+  password: z.string().min(6).max(100),
+});
 
 router.post("/login", async (req, res) => {
   const parsed = LoginSchema.safeParse(req.body);
@@ -123,6 +135,116 @@ router.post("/login", async (req, res) => {
       mustChangePassword: user.mustChangePassword,
     },
   });
+});
+
+// ---------------------------------------------------------------------------
+// POST /auth/register — self-service apartment registration
+// Creates a new apartment with a 30-day trial and an admin user.
+// ---------------------------------------------------------------------------
+router.post("/register", async (req, res) => {
+  const parsed = RegisterSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+
+  const { fullName, email, phone, apartmentCode: providedCode, apartmentName: providedName, password } = parsed.data;
+  const normalizedEmail = email.toLowerCase().trim();
+
+  // Check user doesn't already exist
+  const existingUser = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  if (existingUser) {
+    res.status(409).json({ message: "An account with this email already exists" });
+    return;
+  }
+
+  // Generate or use provided apartment code
+  let apartmentCode = providedCode;
+  if (!apartmentCode) {
+    // Derive a code from the user's name + random suffix
+    const base = fullName
+      .toUpperCase()
+      .replace(/[^A-Z]/g, "")
+      .slice(0, 8);
+    const suffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+    apartmentCode = `${base}-${suffix}`;
+  }
+
+  // Check code uniqueness
+  const existingCode = await prisma.apartment.findUnique({ where: { code: apartmentCode } });
+  if (existingCode) {
+    res.status(409).json({ message: "Apartment code is already taken. Please pick a different one." });
+    return;
+  }
+
+  const apartmentName = providedName || `${fullName}'s Society`;
+  const passwordHash = await bcrypt.hash(password, 10);
+  const apartmentId = randomUUID();
+  const now = new Date();
+  const planExpiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+  try {
+    const apt = await prisma.apartment.create({
+      data: {
+        id: apartmentId,
+        code: apartmentCode,
+        name: apartmentName,
+        city: "Not set",
+        address: "Not set",
+        registeredEmail: normalizedEmail,
+        totalFlats: 50, // Starter plan limit — max 50 flats on trial
+        occupiedFlats: 0,
+        planTier: "Starter",
+        planCycle: "monthly",
+        planExpiresAt,
+        monthlyRevenue: 1499, // Starter monthly price
+        status: "trial",
+      },
+    });
+
+    await prisma.user.create({
+      data: {
+        email: normalizedEmail,
+        passwordHash,
+        name: fullName,
+        role: "apartment_admin",
+        apartmentId: apt.id,
+        apartmentName: apt.name,
+        phone,
+        mustChangePassword: false, // user set their own password
+      },
+    });
+
+    // Send welcome email
+    try {
+      const loginUrl = process.env.FRONTEND_ORIGIN
+        ? `${process.env.FRONTEND_ORIGIN.replace(/\/$/, "")}/login`
+        : "http://localhost:5173/login";
+      await mailer.send(buildSelfRegistrationMail({
+        name: fullName,
+        email: normalizedEmail,
+        apartmentName: apt.name,
+        apartmentCode: apt.code,
+        tempPassword: password, // the password the user chose
+        loginUrl,
+      }));
+    } catch (mailErr) {
+      console.error("[mail] registration welcome email failed", mailErr);
+    }
+
+    res.status(201).json({
+      message: "Society registered successfully! Check your email for login details.",
+      apartmentCode: apt.code,
+      apartmentName: apt.name,
+    });
+  } catch (error: unknown) {
+    if (typeof error === "object" && error && "code" in error && (error as any).code === "P2002") {
+      res.status(409).json({ message: "Apartment code is already taken. Please pick a different one." });
+      return;
+    }
+    console.error("[register] failed to create apartment", error);
+    res.status(500).json({ message: "Unable to register. Please try again." });
+  }
 });
 
 router.post("/logout", (_req, res) => {

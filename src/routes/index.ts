@@ -6,11 +6,18 @@ import complaintsRouter from "./complaints.js";
 import paymentsRouter from "./payments.js";
 import notificationsRouter from "./notifications.js";
 import enquiriesRouter from "./enquiries.js";
+import { plans } from "../lib/plans.js";
 
 const router = Router();
 
 router.get("/healthz", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// Plans endpoint — publicly accessible (no auth required).
+// Used by the pricing page and landing/registration flow.
+router.get("/plans", (_req, res) => {
+  res.json(plans);
 });
 
 router.use("/auth", authRouter);

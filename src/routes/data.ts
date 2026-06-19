@@ -26,10 +26,6 @@ const router = Router();
 // All endpoints below require a valid JWT.
 router.use(requireAuth);
 
-router.get("/plans", (_req, res) => {
-  res.json(plans);
-});
-
 router.get("/apartments", async (_req, res) => {
   const list = await prisma.apartment.findMany({ orderBy: { name: "asc" } });
   res.json(list);
@@ -1358,6 +1354,15 @@ const FlatCreateSchema = z
     }
   });
 
+/**
+ * Returns the maximum number of flats allowed for the apartment based on
+ * its plan tier. If the plan tier isn't found, defaults to 50 (Starter).
+ */
+function getPlanMaxFlats(planTier: string): number {
+  const plan = plans.find((p) => p.name === planTier);
+  return plan?.maxFlats ?? 50;
+}
+
 // Provision (or re-link) the flat_admin user for a flat, sending a welcome
 // invite on email + WhatsApp when contact details are present. Multiple flats
 // can be linked to the same User via the FlatOwner join — the user's
@@ -1601,6 +1606,16 @@ router.post("/apartments/:id/flats", requireCommitteeOrRole("id", "apartment_adm
     return;
   }
 
+  // Enforce plan max flats limit
+  const existingFlatCount = await prisma.flat.count({ where: { apartmentId } });
+  const maxFlats = getPlanMaxFlats(apartment.planTier);
+  if (existingFlatCount >= maxFlats) {
+    res.status(409).json({
+      message: `Cannot add more flats. Your current plan (${apartment.planTier}) allows a maximum of ${maxFlats} flats. Please upgrade your plan to add more.`,
+    });
+    return;
+  }
+
   try {
     const ownerEmail = parsed.data.ownerEmail ? parsed.data.ownerEmail.toLowerCase().trim() : null;
     const ownerMobile = parsed.data.ownerMobile?.trim() || null;
@@ -1752,23 +1767,46 @@ router.post(
       return;
     }
 
-    const restrictBlock = parsedBody.data.blockId
+  const restrictBlock = parsedBody.data.blockId
       ? await prisma.block.findUnique({ where: { id: parsedBody.data.blockId } })
       : null;
-    if (parsedBody.data.blockId && (!restrictBlock || restrictBlock.apartmentId !== apartmentId)) {
-      res.status(400).json({ message: "Block not found in this apartment" });
-      return;
-    }
+  if (parsedBody.data.blockId && (!restrictBlock || restrictBlock.apartmentId !== apartmentId)) {
+    res.status(400).json({ message: "Block not found in this apartment" });
+    return;
+  }
 
-    const existingBlocks = await prisma.block.findMany({ where: { apartmentId } });
-    const blockByName = new Map(existingBlocks.map((b) => [b.name.toLowerCase(), b]));
+  // Enforce plan max flats limit
+  const existingFlatCount = await prisma.flat.count({ where: { apartmentId } });
+  const maxFlats = getPlanMaxFlats(apartment.planTier);
+  const newRows = parsedBody.data.rows.length;
+  const wouldExceedLimit = existingFlatCount + newRows > maxFlats;
+  if (existingFlatCount >= maxFlats) {
+    res.status(409).json({
+      message: `Cannot upload flats. Your current plan (${apartment.planTier}) allows a maximum of ${maxFlats} flats. You already have ${existingFlatCount} flats. Please upgrade your plan to add more.`,
+    });
+    return;
+  }
+  if (wouldExceedLimit) {
+    const availableSlots = maxFlats - existingFlatCount;
+    res.status(409).json({
+      message: `Cannot upload ${newRows} flats — only ${availableSlots} slot(s) remaining under your current plan (${apartment.planTier}, max ${maxFlats} flats). Please upgrade your plan or reduce the upload to ${availableSlots} flats.`,
+      existingCount: existingFlatCount,
+      maxFlats,
+      attemptedRows: newRows,
+      availableSlots,
+    });
+    return;
+  }
 
-    const errors: BulkRowError[] = [];
-    let created = 0;
-    let skipped = 0;
-    let blocksCreated = 0;
+  const existingBlocks = await prisma.block.findMany({ where: { apartmentId } });
+  const blockByName = new Map(existingBlocks.map((b) => [b.name.toLowerCase(), b]));
 
-    for (let i = 0; i < parsedBody.data.rows.length; i++) {
+  const errors: BulkRowError[] = [];
+  let created = 0;
+  let skipped = 0;
+  let blocksCreated = 0;
+
+  for (let i = 0; i < parsedBody.data.rows.length; i++) {
       const rowNum = i + 2; // header is row 1
       const raw = parsedBody.data.rows[i];
       const parsed = BulkRowSchema.safeParse({
