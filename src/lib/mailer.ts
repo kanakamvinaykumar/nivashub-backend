@@ -1,5 +1,3 @@
-import nodemailer, { type Transporter } from "nodemailer";
-
 export interface MailMessage {
   to: string;
   subject: string;
@@ -45,40 +43,55 @@ const consoleMailer: Mailer = {
 };
 
 // ---------------------------------------------------------------------------
-// SMTP sender (nodemailer)
+// Brevo (formerly Sendinblue) — transactional email via REST API
 // ---------------------------------------------------------------------------
-// Activated when SMTP_HOST + SMTP_USER + SMTP_PASS are all set.
-//   · SMTP_HOST       — e.g. sandbox.smtp.mailtrap.io
-//   · SMTP_PORT       — default 587
-//   · SMTP_USER       — auth username
-//   · SMTP_PASS       — auth password
-//   · SMTP_SECURE     — "true" to use TLS-on-connect (port 465). Default false.
-//   · MAIL_FROM       — From: header. Defaults to "NivasHub <no-reply@nivashub.local>".
+// Activated when EMAIL_API_KEY is set.
+//   · EMAIL_API_KEY      — API v3 key from https://app.brevo.com/settings/keys/api
+//   · BREVO_SENDER_NAME  — From: display name (default "NivasHub")
+//   · BREVO_SENDER_EMAIL — From: email address (default "no-reply@nivashub.local")
+//
+// The API is called via native fetch (Node 18+) so no extra SDK or SMTP
+// dependency is required, and no ports need to be open on the server.
 
-function createSmtpMailer(): Mailer | null {
-  const host = process.env.SMTP_HOST;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  if (!host || !user || !pass) return null;
+function createBrevoMailer(): Mailer | null {
+  const apiKey = process.env.EMAIL_API_KEY;
+  if (!apiKey) return null;
 
-  const port = Number(process.env.SMTP_PORT ?? 587);
-  const secure = String(process.env.SMTP_SECURE ?? "false").toLowerCase() === "true";
-  const from = process.env.MAIL_FROM ?? "NivasHub <no-reply@nivashub.local>";
-
-  const transporter: Transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT ?? 10000),
-    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT ?? 10000),
-    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT ?? 20000),
-  });
+  const senderName = process.env.BREVO_SENDER_NAME ?? "NivasHub";
+  const senderEmail = process.env.BREVO_SENDER_EMAIL ?? "no-reply@nivashub.local";
+  const endpoint = "https://api.brevo.com/v3/smtp/email";
 
   return {
     async send({ to, subject, text }) {
-      const info = await transporter.sendMail({ from, to, subject, text });
-      console.log(`[mail] sent to ${to} (id=${info.messageId})`);
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "api-key": apiKey,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          sender: { name: senderName, email: senderEmail },
+          to: [{ email: to }],
+          subject,
+          textContent: text,
+        }),
+      });
+
+      if (!response.ok) {
+        let detail: unknown = await response.text();
+        try {
+          detail = JSON.parse(detail as string);
+        } catch {
+          // keep as text
+        }
+        throw new Error(
+          `[mail] Brevo API error ${response.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`,
+        );
+      }
+
+      const data = (await response.json()) as { messageId?: string };
+      console.log(`[mail] sent to ${to} (messageId=${data.messageId ?? "unknown"})`);
     },
   };
 }
@@ -190,14 +203,14 @@ if (metaSender) {
   console.log("[whatsapp] WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID not set — using console logger.");
 }
 
-const smtpMailer = createSmtpMailer();
-if (smtpMailer) {
-  console.log(`[mail] SMTP sender active (host=${process.env.SMTP_HOST}).`);
+const brevoMailer = createBrevoMailer();
+if (brevoMailer) {
+  console.log("[mail] Brevo API sender active.");
 } else {
-  console.log("[mail] SMTP_HOST / SMTP_USER / SMTP_PASS not set — using console logger.");
+  console.log("[mail] EMAIL_API_KEY not set — using console logger.");
 }
 
-export const mailer: Mailer = smtpMailer ?? consoleMailer;
+export const mailer: Mailer = brevoMailer ?? consoleMailer;
 export const whatsapp: WhatsAppSender = metaSender ?? consoleWhatsApp;
 
 export function buildApartmentWelcomeMail(args: {
@@ -481,7 +494,7 @@ export async function sendOwnerInvite(args: OwnerInviteArgs): Promise<{ email: b
   // Optionally disable WhatsApp sends if the server is configured to use
   // email-only invites. Set DISABLE_WHATSAPP=true in the environment to
   // prevent WhatsApp messages from being sent (useful when you prefer
-  // delivering login details by email only, e.g. via Gmail SMTP).
+  // delivering login details by email only, e.g. via Brevo).
   const disableWhatsApp = String(process.env.DISABLE_WHATSAPP ?? "false").toLowerCase() === "true";
   if (!disableWhatsApp) {
     const wa = buildFlatOwnerWelcomeWhatsApp(args);
