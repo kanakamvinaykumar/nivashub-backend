@@ -119,24 +119,24 @@ export async function sendPushNotification(
     const firebaseApp = getFirebaseApp();
     if (!firebaseApp) return false;
 
+    // Data-only message — no `notification` field.
+    // This ensures Firebase `onMessage` fires in the foreground (the handler
+    // in use-notifications.ts shows the browser notification), and the
+    // service worker's `onBackgroundMessage` handles it in the background.
     const message: Message = {
       token,
-      notification: {
+      data: {
         title: payload.title,
         body: payload.body,
-      },
-      data: {
-        ...(payload.data || {}),
         click_action: payload.clickAction || "/",
         icon: payload.icon || "/nivashub-logo.svg",
+        sound: "/notification.wav",
+        tag: payload.data?.tag || "nivashub-notification",
+        ...(payload.data || {}),
       },
       webpush: {
-        notification: {
-          title: payload.title,
-          body: payload.body,
-          icon: payload.icon || "/nivashub-logo.svg",
-          sound: "/notification.wav",
-          requireInteraction: true,
+        headers: {
+          "Urgency": "high",
         },
         fcmOptions: {
           link: payload.clickAction || "/",
