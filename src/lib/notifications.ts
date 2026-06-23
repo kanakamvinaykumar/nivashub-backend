@@ -15,7 +15,7 @@ interface CreateNotificationInput {
  * Also pushes an FCM push notification if the user has registered devices.
  */
 export async function createNotification(input: CreateNotificationInput): Promise<void> {
-  await prisma.notification.create({
+  const created = await prisma.notification.create({
     data: {
       userId: input.userId,
       apartmentId: input.apartmentId ?? null,
@@ -34,8 +34,19 @@ export async function createNotification(input: CreateNotificationInput): Promis
       body: input.body,
       clickAction: input.link ?? "/",
       icon: "/nivashub-logo.svg",
+      data: {
+        type: input.type,
+        notificationId: created.id,
+        tag: `${input.type}-${created.id}`,
+      },
     });
-  } catch {
+  } catch (error) {
+    console.error("[push] notification push failed", {
+      userId: input.userId,
+      type: input.type,
+      notificationId: created.id,
+      error,
+    });
     // Push failure shouldn't block the notification creation
   }
 }

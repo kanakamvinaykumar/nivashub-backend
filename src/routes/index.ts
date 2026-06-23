@@ -6,6 +6,7 @@ import complaintsRouter from "./complaints.js";
 import paymentsRouter from "./payments.js";
 import notificationsRouter from "./notifications.js";
 import enquiriesRouter from "./enquiries.js";
+import chatRouter from "./chat.js";
 import { plans } from "../lib/plans.js";
 
 const router = Router();
@@ -27,5 +28,5 @@ router.use("/payments", paymentsRouter);
 router.use("/enquiries", enquiriesRouter);
 router.use("/", dataRouter);
 router.use("/notifications", notificationsRouter);
-
+router.use("/chat", chatRouter);
 export default router;

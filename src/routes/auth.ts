@@ -110,6 +110,7 @@ router.post("/login", async (req, res) => {
 
   const token = signToken({
     userId: user.id,
+    name: user.name,
     role: user.role,
     apartmentId: user.apartmentId,
     flatId: user.flatId,
@@ -480,6 +481,7 @@ router.post("/switch-flat", requireAuth, async (req, res) => {
 
   const token = signToken({
     userId: updatedUser.id,
+    name: updatedUser.name,
     role: updatedUser.role,
     apartmentId: updatedUser.apartmentId,
     flatId: updatedUser.flatId,

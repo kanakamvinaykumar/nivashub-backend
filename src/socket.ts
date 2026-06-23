@@ -71,7 +71,23 @@ export interface AnnouncementNotificationData {
 }
 
 export type AnnouncementNotification =
-  | { event: "announcement.created"; data: AnnouncementNotificationData };
+  | { event: "announcement.created"; data: AnnouncementNotificationData }
+  | { event: "announcement.updated"; data: AnnouncementNotificationData }
+  | { event: "announcement.deleted"; data: { id: string; apartmentId: string } };
+
+export interface AnnouncementCommentNotificationData {
+  id: string;
+  announcementId: string;
+  apartmentId: string;
+  userId: string | null;
+  userName: string;
+  userRole: "flat_admin" | "apartment_admin" | "super_admin" | "security";
+  body: string;
+  createdAt: string;
+}
+
+export type AnnouncementCommentNotification =
+  | { event: "announcement.comment.created"; data: AnnouncementCommentNotificationData };
 
 export interface ComplaintMessageNotificationData {
   complaintId: string;
@@ -112,6 +128,7 @@ export type NotificationEvent =
   | VisitorPassNotification
   | PaymentNotification
   | AnnouncementNotification
+  | AnnouncementCommentNotification
   | ComplaintMessageNotification
   | ComplaintCreatedNotification;
 
@@ -197,8 +214,37 @@ export function notifyPaymentRejected(payment: PaymentNotificationData) {
 
 export function notifyAnnouncementCreated(announcement: AnnouncementNotificationData) {
   broadcast(
-    (auth) => auth.role === "flat_admin" && auth.apartmentId === announcement.apartmentId,
+    (auth) =>
+      (auth.role === "flat_admin" || auth.role === "apartment_admin") &&
+      auth.apartmentId === announcement.apartmentId,
     { event: "announcement.created", data: announcement },
+  );
+}
+
+export function notifyAnnouncementUpdated(announcement: AnnouncementNotificationData) {
+  broadcast(
+    (auth) =>
+      (auth.role === "flat_admin" || auth.role === "apartment_admin") &&
+      auth.apartmentId === announcement.apartmentId,
+    { event: "announcement.updated", data: announcement },
+  );
+}
+
+export function notifyAnnouncementDeleted(announcement: { id: string; apartmentId: string }) {
+  broadcast(
+    (auth) =>
+      (auth.role === "flat_admin" || auth.role === "apartment_admin") &&
+      auth.apartmentId === announcement.apartmentId,
+    { event: "announcement.deleted", data: announcement },
+  );
+}
+
+export function notifyAnnouncementCommentCreated(comment: AnnouncementCommentNotificationData) {
+  broadcast(
+    (auth) =>
+      (auth.role === "flat_admin" || auth.role === "apartment_admin") &&
+      auth.apartmentId === comment.apartmentId,
+    { event: "announcement.comment.created", data: comment },
   );
 }
 

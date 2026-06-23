@@ -138,9 +138,31 @@ enum NotificationType {
   payment_approved
   payment_rejected
   announcement_created
+  bazaar_listing_created
   complaint_created
   complaint_message
   enquiry_received
+  new_message
+  group_mention
+  emergency_alert
+}
+
+// ─── Chat / Messaging enums ──────────────────────────────────
+
+enum ChatType {
+  direct
+  group
+  broadcast
+  event
+  security
+}
+
+enum MessageType {
+  text
+  image
+  pdf
+  file
+  system
 }
 
 model User {
@@ -171,6 +193,18 @@ model User {
   committeeMember CommitteeMember?
   fcmTokens FcmToken[]
   notifications Notification[]
+
+  // Chat relations
+  chatParticipants   ChatParticipant[]
+  chatAdmins         ChatAdmin[]
+  sentMessages       Message[]              @relation("SentMessages")
+  messageReactions   MessageReaction[]
+  readReceipts       MessageReadReceipt[]
+  blockedUsers       UserBlock[]            @relation("UserBlocker")
+  blockedBy          UserBlock[]            @relation("UserBlocked")
+  privacy            UserPrivacy?
+  chatReports        ChatReport[]
+  onlineStatus       UserOnlineStatus?
 }
 
 model Apartment {
@@ -214,6 +248,7 @@ model Apartment {
   payments        MaintenancePayment[]
   activityLogs    ActivityLog[]
   notifications   Notification[]
+  chats           Chat[]               // broadcast & apartment-wide chats
 }
 
 model Notification {
@@ -622,4 +657,171 @@ model Enquiry {
   createdAt       DateTime @default(now())
 
   @@index([createdAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMMUNITY MESSAGING MODULE
+// ═══════════════════════════════════════════════════════════════════════════
+
+model Chat {
+  id           String    @id @default(cuid())
+  apartmentId  String?
+  type         ChatType
+  name         String?              // null for direct chats (derived from participants)
+  description  String?
+  avatar       String?              // group avatar URL
+  createdBy    String?              // userId who created the group
+  isArchived   Boolean   @default(false)
+  archivedAt   DateTime?
+  eventDate    DateTime?            // for event groups — auto-archive after this
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  apartment    Apartment?          @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  participants ChatParticipant[]
+  messages     Message[]
+  admins       ChatAdmin[]
+  reports      ChatReport[]
+
+  @@index([apartmentId])
+  @@index([type])
+  @@index([isArchived])
+}
+
+model ChatParticipant {
+  id        String    @id @default(cuid())
+  chatId    String
+  userId    String
+  joinedAt  DateTime  @default(now())
+  leftAt    DateTime?
+  isMuted   Boolean   @default(false)
+  isPinned  Boolean   @default(false)  // pinned to top of chat list
+  lastReadAt DateTime?                 // when user last read this chat
+
+  chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([chatId, userId])
+  @@index([userId])
+  @@index([chatId, lastReadAt])
+}
+
+model ChatAdmin {
+  id     String @id @default(cuid())
+  chatId String
+  userId String
+
+  chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([chatId, userId])
+}
+
+model Message {
+  id             String      @id @default(cuid())
+  chatId         String
+  senderId       String
+  senderName     String
+  type           MessageType @default(text)
+  body           String?
+  mediaUrl       String?     // for images, PDFs, files
+  mediaType      String?     // mime type
+  mediaName      String?     // original file name
+  mediaSize      Int?        // file size in bytes
+  replyToId      String?     // reply to a previous message
+  mentions       String[]    @default([]) // user IDs mentioned
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  chat      Chat              @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  sender    User              @relation("SentMessages", fields: [senderId], references: [id])
+  replyTo   Message?          @relation("MessageReply", fields: [replyToId], references: [id])
+  replies   Message[]         @relation("MessageReply")
+  reactions MessageReaction[]
+  readBy    MessageReadReceipt[]
+
+  @@index([chatId, createdAt(sort: Desc)])
+  @@index([senderId])
+  @@index([chatId, type])
+}
+
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+}
+
+model MessageReadReceipt {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  readAt    DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId, readAt])
+}
+
+model UserBlock {
+  id         String   @id @default(cuid())
+  blockerId  String
+  blockedId  String
+  createdAt  DateTime @default(now())
+
+  blocker User @relation("UserBlocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("UserBlocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+}
+
+model UserPrivacy {
+  id                  String   @id @default(cuid())
+  userId              String   @unique
+  allowAll            Boolean  @default(true)
+  allowResidentsOnly  Boolean  @default(false)
+  allowCommitteeOnly  Boolean  @default(false)
+  lastSeenVisible     Boolean  @default(true)
+  onlineStatusVisible Boolean  @default(true)
+  readReceiptsEnabled Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserOnlineStatus {
+  id        String    @id @default(cuid())
+  userId    String    @unique
+  isOnline  Boolean   @default(false)
+  lastSeen  DateTime? @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ChatReport {
+  id          String   @id @default(cuid())
+  reporterId  String
+  messageId   String?
+  chatId      String?
+  reason      String
+  description String?
+  status      String   @default("pending") // pending, resolved, dismissed
+  createdAt   DateTime @default(now())
+  resolvedAt  DateTime?
+
+  reporter User @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  chat     Chat? @relation(fields: [chatId], references: [id], onDelete: SetNull)
+
+  @@index([reporterId])
+  @@index([status])
 }

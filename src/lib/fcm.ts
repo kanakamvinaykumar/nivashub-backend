@@ -170,23 +170,27 @@ export async function sendMulticastPushNotification(
     const firebaseApp = getFirebaseApp();
     if (!firebaseApp) return 0;
 
+    // Data-only message — no `notification` field.
+    // This ensures Firebase `onMessage` fires in the foreground (the handler
+    // in use-notifications.ts shows the browser notification + plays sound),
+    // and the service worker's `onBackgroundMessage` handles it in the
+    // background.  A `notification` field would cause FCM to auto-display the
+    // notification, which would bypass our custom foreground handler and its
+    // sound playback.
     const message: MulticastMessage = {
       tokens,
-      notification: {
+      data: {
         title: payload.title,
         body: payload.body,
-      },
-      data: {
-        ...(payload.data || {}),
         click_action: payload.clickAction || "/",
         icon: payload.icon || "/nivashub-logo.svg",
+        sound: "/notification.wav",
+        tag: payload.data?.tag || "nivashub-notification",
+        ...(payload.data || {}),
       },
       webpush: {
-        notification: {
-          title: payload.title,
-          body: payload.body,
-          icon: payload.icon || "/nivashub-logo.svg",
-          requireInteraction: true,
+        headers: {
+          Urgency: "high",
         },
         fcmOptions: {
           link: payload.clickAction || "/",

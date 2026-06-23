@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { randomUUID } from "crypto";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
@@ -17,8 +17,16 @@ import {
 import { recordActivity, getApartmentActivity } from "../lib/activity.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { requireCommitteeOrRole, requireApartmentAccess } from "../lib/committee.js";
-import { notifyVisitorPassCreated, notifyVisitorPassUpdated, notifyAnnouncementCreated } from "../socket.js";
+import {
+  notifyVisitorPassCreated,
+  notifyVisitorPassUpdated,
+  notifyAnnouncementCreated,
+  notifyAnnouncementUpdated,
+  notifyAnnouncementDeleted,
+  notifyAnnouncementCommentCreated,
+} from "../socket.js";
 import { notifyFlatOwners, notifyApartmentAdmins, notifyAllFlatAdmins } from "../lib/notifications.js";
+import { notifyFlatOwnersPush, notifyApartmentRolePush } from "../lib/notify-push.js";
 import { processAttachment } from "../lib/media.js";
 
 const router = Router();
@@ -104,10 +112,11 @@ router.get("/apartments/:id/summary", async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const totalResidents = flats.reduce((s, f) => s + f.residentCount, 0);
   const totalDues = flats.reduce((s, f) => s + f.pendingDuesInr, 0);
+  const occupiedFlats = flats.filter((f) => f.status === "occupied" || f.status === "rented").length;
   res.json({
     apartmentId: id,
-    totalFlats: apt.totalFlats,
-    occupiedFlats: apt.occupiedFlats,
+    totalFlats: flats.length,
+    occupiedFlats,
     totalResidents,
     pendingApprovals: 4,
     activeAnnouncements: annCount,
@@ -152,18 +161,34 @@ router.get("/apartments/:id/members", async (req, res) => {
     include: { residents: true },
     orderBy: [{ block: "asc" }, { number: "asc" }],
   });
-  const members = flats.flatMap((f) =>
-    f.residents.map((r) => ({
-      id: r.id,
-      name: r.name,
-      relation: r.relation,
-      phone: r.phone,
-      flatNumber: f.number,
-      flatId: f.id,
-      block: f.block,
-      ownerName: f.ownerName,
-    })),
-  );
+  const members = flats.flatMap((f) => {
+    // If the flat has explicit residents, use them.
+    if (f.residents.length > 0) {
+      return f.residents.map((r) => ({
+        id: r.id,
+        name: r.name,
+        relation: r.relation,
+        phone: r.phone,
+        flatNumber: f.number,
+        flatId: f.id,
+        block: f.block,
+        ownerName: f.ownerName,
+      }));
+    }
+    // Fallback: synthesise an "Owner" member from the flat's own fields.
+    return [
+      {
+        id: `owner-${f.id}`,
+        name: f.ownerName,
+        relation: "Owner",
+        phone: f.ownerMobile ?? "",
+        flatNumber: f.number,
+        flatId: f.id,
+        block: f.block,
+        ownerName: f.ownerName,
+      },
+    ];
+  });
   res.json(members);
 });
 
@@ -571,6 +596,46 @@ const AnnouncementCommentSchema = z.object({
   body: z.string().min(1).max(1000).transform((v) => v.trim()),
 });
 
+const AnnouncementUpdateSchema = AnnouncementSchema.omit({
+  apartmentId: true,
+  authorName: true,
+}).partial().refine((value) => Object.keys(value).length > 0, {
+  message: "At least one field is required",
+});
+
+function canManageAnnouncement(req: Request, apartmentId: string): boolean {
+  if (req.auth?.role === "super_admin") return true;
+  return req.auth?.role === "apartment_admin" && req.auth.apartmentId === apartmentId;
+}
+
+function serializeAnnouncement(announcement: {
+  id: string;
+  apartmentId: string;
+  title: string;
+  body: string;
+  priority: "low" | "normal" | "urgent";
+  pinned: boolean;
+  authorName: string;
+  attachments: string[];
+  commentsCount: number;
+  seenCount: number;
+  createdAt: Date;
+}) {
+  return {
+    id: announcement.id,
+    apartmentId: announcement.apartmentId,
+    title: announcement.title,
+    body: announcement.body,
+    priority: announcement.priority,
+    pinned: announcement.pinned,
+    authorName: announcement.authorName,
+    attachments: announcement.attachments,
+    commentsCount: announcement.commentsCount,
+    seenCount: announcement.seenCount,
+    createdAt: announcement.createdAt.toISOString(),
+  };
+}
+
 router.post("/announcements", async (req, res) => {
   const parsed = AnnouncementSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -585,30 +650,69 @@ router.post("/announcements", async (req, res) => {
   const created = await prisma.announcement.create({
     data: { ...parsed.data, attachments, commentsCount: 0, seenCount: 0 },
   });
-  notifyAnnouncementCreated({
-    id: created.id,
-    apartmentId: created.apartmentId,
-    title: created.title,
-    body: created.body,
-    priority: created.priority,
-    pinned: created.pinned,
-    authorName: created.authorName,
-    attachments: created.attachments,
-    commentsCount: created.commentsCount,
-    seenCount: created.seenCount,
-    createdAt: created.createdAt.toISOString(),
-  });
+  notifyAnnouncementCreated(serializeAnnouncement(created));
 
   // Persist in-app notifications for all flat admins
   notifyAllFlatAdmins(
     created.apartmentId,
     "announcement_created",
-    created.title,
+    `New announcement: ${created.title}`,
     created.body.length > 200 ? created.body.slice(0, 200) + "…" : created.body,
     "/flat-admin/announcements",
   ).catch((err: unknown) => console.error("[notification] announcement notification failed", err));
 
   res.status(201).json(created);
+});
+
+router.patch("/announcements/:id", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+  const parsed = AnnouncementUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+
+  const announcement = await prisma.announcement.findUnique({ where: { id: req.params.id } });
+  if (!announcement) {
+    res.status(404).json({ message: "Announcement not found" });
+    return;
+  }
+  if (!canManageAnnouncement(req, announcement.apartmentId)) {
+    res.status(403).json({ message: "Forbidden" });
+    return;
+  }
+
+  const attachments = parsed.data.attachments
+    ? await Promise.all(
+        parsed.data.attachments.map((attachment, index) =>
+          processAttachment(attachment, `announcement_${randomUUID()}_${index}`),
+        ),
+      )
+    : undefined;
+
+  const updated = await prisma.announcement.update({
+    where: { id: req.params.id },
+    data: { ...parsed.data, ...(attachments ? { attachments } : {}) },
+  });
+
+  notifyAnnouncementUpdated(serializeAnnouncement(updated));
+
+  res.json(updated);
+});
+
+router.delete("/announcements/:id", requireRole("apartment_admin", "super_admin"), async (req, res) => {
+  const announcement = await prisma.announcement.findUnique({ where: { id: req.params.id } });
+  if (!announcement) {
+    res.status(404).json({ message: "Announcement not found" });
+    return;
+  }
+  if (!canManageAnnouncement(req, announcement.apartmentId)) {
+    res.status(403).json({ message: "Forbidden" });
+    return;
+  }
+
+  await prisma.announcement.delete({ where: { id: req.params.id } });
+  notifyAnnouncementDeleted({ id: announcement.id, apartmentId: announcement.apartmentId });
+  res.status(204).send();
 });
 
 router.get("/announcements/:id/comments", async (req, res) => {
@@ -655,6 +759,17 @@ router.post("/announcements/:id/comments", async (req, res) => {
       data: { commentsCount: { increment: 1 } },
     });
     return comment;
+  });
+
+  notifyAnnouncementCommentCreated({
+    id: created.id,
+    announcementId: created.announcementId,
+    apartmentId: announcement.apartmentId,
+    userId: created.userId,
+    userName: created.userName,
+    userRole: created.userRole,
+    body: created.body,
+    createdAt: created.createdAt.toISOString(),
   });
 
   res.status(201).json(created);
@@ -735,7 +850,89 @@ router.post("/listings", async (req, res) => {
   const created = await prisma.listing.create({
     data: { ...parsed.data, status: "active" },
   });
+
+  // Push notification to all flat owners about new bazaar listing
+  notifyAllFlatAdmins(
+    created.apartmentId,
+    "bazaar_listing_created",
+    `New listing in Bazaar: ${created.title}`,
+    `₹${created.price} — ${created.category} — ${created.sellerName}, ${created.sellerFlat}`,
+    "/flat-admin/bazaar",
+  ).catch((err: unknown) => console.error("[notification] bazaar listing notification failed", err));
+
+  // Push notification to all apartment admins
+  notifyApartmentAdmins(
+    created.apartmentId,
+    "bazaar_listing_created",
+    `New Bazaar listing: ${created.title}`,
+    `₹${created.price} — ${created.category} by ${created.sellerName} (${created.sellerFlat})`,
+    "/apartment-admin/bazaar",
+  ).catch((err: unknown) => console.error("[notification] bazaar listing admin notification failed", err));
+
   res.status(201).json(created);
+});
+
+const ListingUpdateSchema = z.object({
+  title: z.string().min(3).max(120).optional(),
+  description: z.string().min(1).max(2000).optional(),
+  price: z.number().min(0).optional(),
+  category: z.string().optional(),
+  condition: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  status: z.enum(["active", "sold", "archived"]).optional(),
+});
+
+router.patch("/listings/:id", async (req, res) => {
+  const listing = await prisma.listing.findUnique({ where: { id: req.params.id } });
+  if (!listing) {
+    res.status(404).json({ message: "Listing not found" });
+    return;
+  }
+
+  // Look up the current user to determine seller match
+  const user = req.auth?.userId ? await prisma.user.findUnique({ where: { id: req.auth.userId } }) : null;
+  const isSeller = user != null && listing.sellerFlat === user.flatNumber && listing.sellerName === user.name;
+  const isApartmentAdmin = req.auth?.role === "apartment_admin" && req.auth?.apartmentId === listing.apartmentId;
+  const isSuperAdmin = req.auth?.role === "super_admin";
+
+  if (!isSeller && !isApartmentAdmin && !isSuperAdmin) {
+    res.status(403).json({ message: "Forbidden — you can only edit your own listings" });
+    return;
+  }
+
+  const parsed = ListingUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ message: "Invalid request body", errors: parsed.error.flatten() });
+    return;
+  }
+
+  const updated = await prisma.listing.update({
+    where: { id: req.params.id },
+    data: parsed.data,
+  });
+  res.json(updated);
+});
+
+router.delete("/listings/:id", async (req, res) => {
+  const listing = await prisma.listing.findUnique({ where: { id: req.params.id } });
+  if (!listing) {
+    res.status(404).json({ message: "Listing not found" });
+    return;
+  }
+
+  // Look up the current user to determine seller match
+  const user = req.auth?.userId ? await prisma.user.findUnique({ where: { id: req.auth.userId } }) : null;
+  const isSeller = user != null && listing.sellerFlat === user.flatNumber && listing.sellerName === user.name;
+  const isApartmentAdmin = req.auth?.role === "apartment_admin" && req.auth?.apartmentId === listing.apartmentId;
+  const isSuperAdmin = req.auth?.role === "super_admin";
+
+  if (!isSeller && !isApartmentAdmin && !isSuperAdmin) {
+    res.status(403).json({ message: "Forbidden — you can only delete your own listings" });
+    return;
+  }
+
+  await prisma.listing.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
 });
 
 const COMMITTEE_POSITIONS = ["president", "secretary", "treasurer", "maintenance", "cultural", "security"] as const;
@@ -1325,6 +1522,7 @@ const FlatCreateSchema = z
     tenantEmail: z.string().email().optional().nullable().or(z.literal("")),
     tenantMobile: z.string().max(40).optional().nullable(),
     residentCount: z.number().int().min(0).max(20).default(0),
+    pendingDuesInr: z.number().int().min(0).default(0),
     monthlyMaintenanceInr: z.number().int().min(0).max(1_000_000).default(2000),
     yearlyAmcInr: z.number().int().min(0).max(10_000_000).default(9000),
   })
@@ -1640,7 +1838,7 @@ router.post("/apartments/:id/flats", requireCommitteeOrRole("id", "apartment_adm
         tenantMobile,
         residentCount: parsed.data.residentCount,
         status: parsed.data.occupantType === "tenant" ? "rented" : (parsed.data.residentCount > 0 ? "occupied" : "vacant"),
-        pendingDuesInr: 0,
+        pendingDuesInr: parsed.data.pendingDuesInr,
         monthlyMaintenanceInr: parsed.data.monthlyMaintenanceInr,
         yearlyAmcInr: parsed.data.yearlyAmcInr,
       },
@@ -2427,6 +2625,14 @@ router.post("/visitor-passes", async (req, res) => {
     `${created.guestName} (${created.type}) — valid until ${created.expiresAt.toLocaleDateString()}`,
     "/flat-admin/visitors",
   ).catch((err: unknown) => console.error("[notification] visitor pass notification failed", err));
+
+  // Push notification to security staff
+  notifyApartmentRolePush(created.apartmentId, ["security"], {
+    title: `Visitor: ${created.guestName}`,
+    body: `${created.guestName} requested entry to ${created.flatNumber} (${created.type})`,
+    data: { type: "visitor_pass_created", visitorPassId: created.id },
+    clickAction: "/visitors",
+  }).catch((err: unknown) => console.error("[push] visitor pass security notification failed", err));
 
   res.status(201).json(created);
 });
