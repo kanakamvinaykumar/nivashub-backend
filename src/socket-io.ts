@@ -35,7 +35,7 @@ export function getIO(): Server {
 
 export function initializeSocketIO(server: HttpServer) {
   io = new Server(server, {
-    path: "/socket.io",
+    path: "/ws/socket.io",
     cors: {
       origin: (process.env.FRONTEND_ORIGIN || "*").split(",").map((o) => o.trim()),
       credentials: true,

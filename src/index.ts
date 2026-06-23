@@ -30,5 +30,5 @@ server.listen(port, () => {
   console.log(`[nivashub-backend] Listening on http://localhost:${port}`);
   console.log(`[nivashub-backend] API base path: /api`);
   console.log(`[nivashub-backend] WebSocket path: /ws`);
-  console.log(`[nivashub-backend] Socket.IO path: /socket.io`);
+  console.log(`[nivashub-backend] Socket.IO path: /ws/socket.io`);
 });
